@@ -32,6 +32,14 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
+
+# uploads
+/uploads
+
+# worker runtime data (Chrome profiles — hàng chục nghìn file)
+/automation-profile-manager/apps/worker/data/
+
 
 # vercel
 .vercel

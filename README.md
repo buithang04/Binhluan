@@ -1,36 +1,53 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Binhluan — CRM + Automation Profile Manager (thống nhất)
 
-## Getting Started
+Một sản phẩm: **1 đăng nhập**, **Admin** cấu hình, **User** dùng & truyền liệu.  
+**Database duy nhất:** PostgreSQL (+ Redis cho queue). MySQL CRM chỉ còn file lưu trữ migrate.
 
-First, run the development server:
+## Chạy local (1 lệnh)
+
+Từ **root** repo (sau lần đầu `npm install` ở root + trong `automation-profile-manager`):
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Lệnh này tự: bật Docker Desktop nếu cần → `docker compose up` (Postgres `:5433` + Redis `:6379`) → sync `.env` APM → chạy **API + worker + scheduler + Next**.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+- UI: http://localhost:3000/login  
+- Admin: `/admin` · User: `/app`  
+- API: http://localhost:4000/api  
+- Tài khoản mẫu: `admin@apm.local` / `Admin@123`
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Chỉ UI: `npm run dev:web` · Chỉ infra: `npm run docker:up`
 
-## Learn More
+### Setup lần đầu (một lần)
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+npm install
+cd automation-profile-manager && npm install
+npm run build -w @apm/shared && npm run build -w @apm/crypto
+npm run db:generate && npm run db:migrate && npm run db:seed
+cd ..
+# đảm bảo có .env (DATABASE_URL postgres :5433) và automation-profile-manager/.env
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## MySQL CRM (legacy — không chạy mặc định)
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```bash
+docker compose -f docker-compose.crm.yml up -d mysql   # port 3307, volume mysql_data giữ nguyên
+```
 
-## Deploy on Vercel
+Chỉ bật khi cần migrate dữ liệu cũ sang Postgres (`npm run migrate:crm` trong APM).
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Deploy lên server
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Toàn bộ lệnh cài đặt, PM2, Nginx, URL các trang admin, curl API, backup: xem **[deploy/README.md](deploy/README.md)**.
+
+## Cấu trúc
+
+| Phần | Vai trò |
+|------|---------|
+| `src/` (Next.js) | UI chung: login, `/admin`, `/app` |
+| `automation-profile-manager/` | Nest API, worker, scheduler, Prisma (Postgres) |
+| `deploy/` | Nginx + README vận hành server |
+| `docker-compose.crm.yml` | MySQL legacy (stopped by default) |

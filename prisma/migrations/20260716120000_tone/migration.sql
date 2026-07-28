@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE `ContentTemplate` ADD COLUMN `tone` ENUM('FORMAL', 'FRIENDLY', 'CASUAL') NOT NULL DEFAULT 'FRIENDLY';

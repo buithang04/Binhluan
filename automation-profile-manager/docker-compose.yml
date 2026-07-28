@@ -1,0 +1,34 @@
+# Backward-compatible entry — same stack as repo root docker-compose.yml
+name: automation-profile-manager
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: apm
+      POSTGRES_PASSWORD: apmsecret
+      POSTGRES_DB: apm
+    ports:
+      - "5433:5432"
+    volumes:
+      - apm_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U apm -d apm"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  apm_pg:

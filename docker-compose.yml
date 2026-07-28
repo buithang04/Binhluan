@@ -1,0 +1,42 @@
+# Unified product stack (Postgres + Redis).
+# Project name keeps existing volumes: automation-profile-manager_apm_pg
+name: automation-profile-manager
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: apm
+      POSTGRES_PASSWORD: apmsecret
+      POSTGRES_DB: apm
+    ports:
+      - "5433:5432"
+    volumes:
+      - apm_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U apm -d apm"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Optional app containers (dev vẫn chạy npm local). Bật bằng:
+  #   docker compose --profile apps up -d --build
+  # api:
+  #   profiles: ["apps"]
+  #   build: ./automation-profile-manager/apps/api
+  #   ...
+
+volumes:
+  apm_pg:

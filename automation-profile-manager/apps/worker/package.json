@@ -1,0 +1,21 @@
+{
+  "name": "@apm/worker",
+  "version": "0.1.0",
+  "scripts": {
+    "start:dev": "tsx src/main.ts",
+    "start:watch": "tsx watch src/main.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@apm/shared": "*",
+    "bullmq": "^5.44.0",
+    "ioredis": "^5.6.0",
+    "puppeteer": "^24.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}

@@ -1,0 +1,421 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ——— Auth (unified): ADMIN | USER ———
+enum Role {
+  ADMIN
+  USER
+}
+
+model User {
+  id                  String         @id @default(uuid())
+  email               String         @unique
+  passwordHash        String
+  name                String?
+  role                Role           @default(USER)
+  isActive            Boolean        @default(true)
+  lastLoginAt         DateTime?
+  failedLoginAttempts Int            @default(0)
+  lockedUntil         DateTime?
+  /** ADMIN: tăng mỗi lần đăng nhập — phiên cũ (thiết bị khác) bị vô hiệu. */
+  sessionVersion      Int            @default(0)
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+  auditLogs           AuditLog[]
+  refreshTokens       RefreshToken[]
+  projects            Project[]
+  businesses          Business[]
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  userId    String
+  tokenHash String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ——— APM automation ———
+enum AccountStatus {
+  UNREADY
+  READY
+  RUNNING
+  ERROR
+  DISABLED
+}
+
+enum ProxyStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum ProxyHealth {
+  WORKING
+  FAILED
+  UNKNOWN
+}
+
+enum ProfileStatus {
+  UNREADY
+  READY
+  QUEUED
+  RUNNING
+  ERROR
+  DISABLED
+}
+
+enum JobStatus {
+  PENDING
+  ACTIVE
+  COMPLETED
+  FAILED
+  DEAD
+}
+
+enum WorkerStatus {
+  ONLINE
+  DRAINING
+  OFFLINE
+}
+
+model GoogleAccount {
+  id            String        @id @default(uuid())
+  email         String        @unique
+  passwordEnc   Bytes
+  totpSecretEnc Bytes?
+  recoveryEmail String?
+  recoveryPhone String?
+  status        AccountStatus @default(UNREADY)
+  lastLogin     DateTime?
+  nextLogin     DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  profile       Profile?
+
+  @@index([status])
+}
+
+model Proxy {
+  id            String            @id @default(uuid())
+  host          String
+  port          Int
+  usernameEnc   Bytes?
+  passwordEnc   Bytes?
+  protocol      String            @default("http")
+  country       String?
+  city          String?
+  note          String?
+  maxProfiles   Int               @default(10)
+  status        ProxyStatus       @default(ACTIVE)
+  health        ProxyHealth       @default(UNKNOWN)
+  lastCheckedAt DateTime?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+  assignments   ProxyAssignment[]
+  profiles      Profile[]
+
+  @@unique([host, port])
+  @@index([status])
+  @@index([health])
+}
+
+model Profile {
+  id                 String         @id @default(uuid())
+  accountId          String         @unique
+  proxyId            String
+  browserIndex       Int            @unique
+  browserAlive       Boolean        @default(false)
+  browserWorkerId    String?
+  browserProfilePath String
+  cookiePath         String
+  localStoragePath   String?
+  timezone           String?
+  language           String?
+  userAgent          String?
+  viewport           Json?
+  cooldownMinutes    Int            @default(60)
+  lastRun            DateTime?
+  nextRun            DateTime       @default(now())
+  leaseUntil         DateTime?
+  leaseToken         String?
+  status             ProfileStatus  @default(UNREADY)
+  currentTask        String?
+  browserVersion     String?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+  account            GoogleAccount  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  proxy              Proxy          @relation(fields: [proxyId], references: [id])
+  assignment         ProxyAssignment?
+  jobs               JobRun[]
+
+  @@index([status, nextRun])
+  @@index([leaseUntil])
+  @@index([proxyId])
+  @@index([browserAlive])
+}
+
+model ProxyAssignment {
+  id        String   @id @default(uuid())
+  proxyId   String
+  profileId String   @unique
+  createdAt DateTime @default(now())
+  proxy     Proxy    @relation(fields: [proxyId], references: [id], onDelete: Cascade)
+  profile   Profile  @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@index([proxyId])
+}
+
+model TaskDefinition {
+  code       String   @id
+  name       String
+  timeoutMs  Int      @default(120000)
+  maxRetries Int      @default(3)
+  handlerKey String
+  createdAt  DateTime @default(now())
+  jobs       JobRun[]
+}
+
+model JobRun {
+  id         String         @id @default(uuid())
+  profileId  String
+  taskCode   String
+  status     JobStatus      @default(PENDING)
+  workerId   String?
+  startedAt  DateTime?
+  finishedAt DateTime?
+  durationMs Int?
+  error      String?
+  stacktrace String?
+  result     Json?
+  retryCount Int            @default(0)
+  createdAt  DateTime       @default(now())
+  profile    Profile        @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  task       TaskDefinition @relation(fields: [taskCode], references: [code])
+
+  @@index([createdAt])
+  @@index([profileId, status])
+  @@index([status])
+}
+
+model WorkerNode {
+  id            String       @id
+  hostname      String
+  status        WorkerStatus @default(ONLINE)
+  concurrency   Int          @default(1)
+  runningJobs   Int          @default(0)
+  cpuPercent    Float?
+  memPercent    Float?
+  queueLength   Int          @default(0)
+  lastHeartbeat DateTime     @default(now())
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@index([lastHeartbeat])
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  actorId    String?
+  action     String
+  entityType String
+  entityId   String?
+  before     Json?
+  after      Json?
+  createdAt  DateTime @default(now())
+  actor      User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([entityType, entityId])
+}
+
+// ——— CRM content / projects ———
+enum ProjectStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  COMPLETED
+}
+
+enum ContentType {
+  OUTREACH_EMAIL
+  CONSULT_MESSAGE
+  BRAND_COPY
+}
+
+enum ContentTone {
+  FORMAL
+  FRIENDLY
+  CASUAL
+}
+
+enum CampaignStatus {
+  DRAFT
+  ACTIVE
+  COMPLETED
+}
+
+enum GeneratedStatus {
+  GENERATED
+  EXPORTED
+  ARCHIVED
+}
+
+model Package {
+  id             String    @id @default(uuid())
+  code           String    @unique
+  name           String
+  description    String?
+  maxProducts    Int       @default(20)
+  maxMedia       Int       @default(50)
+  targetContents Int       @default(100)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  projects       Project[]
+}
+
+model ContentTemplate {
+  id        String            @id @default(uuid())
+  code      String            @unique
+  name      String
+  type      ContentType       @default(OUTREACH_EMAIL)
+  tone      ContentTone       @default(FRIENDLY)
+  bodySpin  String
+  isActive  Boolean           @default(true)
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+  campaigns ContentCampaign[]
+}
+
+model ContentCampaign {
+  id          String             @id @default(uuid())
+  projectId   String
+  templateId  String
+  targetCount Int
+  status      CampaignStatus     @default(ACTIVE)
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+  project     Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  template    ContentTemplate    @relation(fields: [templateId], references: [id])
+  contents    GeneratedContent[]
+
+  @@index([projectId])
+}
+
+model GeneratedContent {
+  id           String          @id @default(uuid())
+  campaignId   String
+  rawSpin      String
+  resolvedText String
+  variantIndex Int
+  status       GeneratedStatus @default(GENERATED)
+  createdAt    DateTime        @default(now())
+  campaign     ContentCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId])
+}
+
+model Project {
+  id               String            @id @default(uuid())
+  userId           String
+  packageId        String
+  brandName        String
+  website          String?
+  brandDescription String
+  targetAudience   String
+  targetMarket     String
+  writingNotes     String?
+  contentDirection String?
+  contentLanguage  String            @default("VI")
+  contentExample   String?           @db.Text
+  contentWordCount Int?
+  contentPromptJson String?           @db.Text
+  googleMapsUrl    String
+  desiredRating    Decimal?          @db.Decimal(2, 1)
+  currentRating    Decimal?          @db.Decimal(2, 1)
+  reviewCount      Int?
+  reviewsToPost    Int?
+  proxyCooldownMinutes Int           @default(60)
+  startAt          DateTime
+  endAt            DateTime
+  status           ProjectStatus     @default(DRAFT)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  package          Package           @relation(fields: [packageId], references: [id])
+  products         Product[]
+  media            MediaAsset[]
+  campaigns        ContentCampaign[]
+
+  @@unique([userId, googleMapsUrl])
+  @@index([userId])
+  @@index([status])
+}
+
+model Product {
+  id          String   @id @default(uuid())
+  projectId   String
+  name        String
+  description String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, name])
+  @@index([projectId])
+}
+
+model MediaAsset {
+  id        String   @id @default(uuid())
+  projectId String
+  fileName  String
+  filePath  String
+  caption   String?
+  mimeType  String
+  sizeBytes Int
+  createdAt DateTime @default(now())
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+}
+
+/** Hồ sơ doanh nghiệp của USER — Active = mặc định khi tạo dự án. */
+model Business {
+  id               String            @id @default(uuid())
+  userId           String
+  brandName        String
+  website          String?
+  brandDescription String            @default("")
+  targetAudience   String            @default("")
+  targetMarket     String            @default("")
+  writingNotes     String?
+  isActive         Boolean           @default(false)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  products         BusinessProduct[]
+
+  @@index([userId])
+  @@index([userId, isActive])
+}
+
+model BusinessProduct {
+  id          String   @id @default(uuid())
+  businessId  String
+  name        String
+  description String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  business    Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, name])
+  @@index([businessId])
+}

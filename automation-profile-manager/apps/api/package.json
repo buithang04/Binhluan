@@ -1,0 +1,39 @@
+{
+  "name": "@apm/api",
+  "version": "0.1.0",
+  "scripts": {
+    "start:dev": "concurrently -k \"tsc -p tsconfig.json -w --preserveWatchOutput\" \"node --watch dist/main.js\"",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "prestart:dev": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@apm/crypto": "*",
+    "@apm/prisma": "*",
+    "@apm/shared": "*",
+    "@nestjs/common": "^11.0.12",
+    "@nestjs/config": "^4.0.2",
+    "@nestjs/core": "^11.0.12",
+    "@nestjs/jwt": "^11.0.0",
+    "@nestjs/passport": "^11.0.5",
+    "@nestjs/platform-express": "^11.0.12",
+    "@nestjs/throttler": "^6.4.0",
+    "bullmq": "^5.44.0",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.1",
+    "ioredis": "^5.6.0",
+    "passport": "^0.7.0",
+    "passport-jwt": "^4.0.1",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.1",
+    "@types/node": "^22.13.10",
+    "@types/passport-jwt": "^4.0.1",
+    "concurrently": "^10.0.3",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}

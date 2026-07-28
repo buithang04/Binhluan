@@ -1,0 +1,27 @@
+{
+  "name": "automation-profile-manager",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:api": "npm run env:sync && npm run start:dev -w @apm/api",
+    "dev:scheduler": "npm run env:sync && npm run start:dev -w @apm/scheduler",
+    "dev:worker": "npm run env:sync && npm run start:dev -w @apm/worker",
+    "dev:web": "npm run env:sync && npm run dev -w @apm/web",
+    "env:sync": "node scripts/env-sync.js",
+    "build": "npm run build -w @apm/shared && npm run build -w @apm/crypto && npm run build -w @apm/prisma && npm run build -w @apm/api && npm run build -w @apm/scheduler && npm run build -w @apm/worker && npm run build -w @apm/web",
+    "db:generate": "npm run generate -w @apm/prisma",
+    "db:migrate": "npm run migrate:dev -w @apm/prisma",
+    "db:seed": "npm run seed -w @apm/prisma",
+    "migrate:crm": "npm run env:sync && tsx scripts/migrate-crm-mysql-to-postgres.ts",
+    "docker:up": "docker compose up -d postgres redis"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "mysql2": "^3.23.0"
+  }
+}

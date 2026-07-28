@@ -1,0 +1,5 @@
+-- AlterTable
+ALTER TABLE "Project" ADD COLUMN IF NOT EXISTS "contentDirection" TEXT;
+ALTER TABLE "Project" ADD COLUMN IF NOT EXISTS "contentLanguage" TEXT NOT NULL DEFAULT 'VI';
+ALTER TABLE "Project" ADD COLUMN IF NOT EXISTS "contentExample" TEXT;
+ALTER TABLE "Project" ADD COLUMN IF NOT EXISTS "contentWordCount" INTEGER;
