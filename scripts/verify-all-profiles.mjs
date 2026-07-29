@@ -23,7 +23,7 @@ async function api(path, { method = "GET", token, body } = {}) {
 async function main() {
   const login = await api("/auth/login", {
     method: "POST",
-    body: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD },
+    body: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD, service: true },
   });
   const token = login.accessToken;
   if (!token) throw new Error("Login failed");

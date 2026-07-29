@@ -38,7 +38,11 @@ export class AuthService {
     private readonly jwt: JwtService,
   ) {}
 
-  async login(email: string, password: string) {
+  async login(
+    email: string,
+    password: string,
+    opts?: { service?: boolean },
+  ) {
     const normalized = email.toLowerCase().trim();
     const user = await this.prisma.user.findUnique({ where: { email: normalized } });
 
@@ -80,15 +84,18 @@ export class AuthService {
       });
     }
 
+    // service=true: job server (dispatch) — KHÔNG bump sessionVersion / KHÔNG xóa refresh
+    // (tránh đá phiên Admin đang mở trên trình duyệt mỗi khi đăng bài / mở browser).
+    const isService = opts?.service === true;
+    const bumpAdminSession = user.role === Role.ADMIN && !isService;
+
     await this.prisma.user.update({
       where: { id: user.id },
       data: {
         failedLoginAttempts: 0,
         lockedUntil: null,
         lastLoginAt: new Date(),
-        ...(user.role === Role.ADMIN
-          ? { sessionVersion: { increment: 1 } }
-          : {}),
+        ...(bumpAdminSession ? { sessionVersion: { increment: 1 } } : {}),
       },
     });
 
@@ -96,8 +103,8 @@ export class AuthService {
       where: { id: user.id },
     });
 
-    // ADMIN: chỉ 1 thiết bị — xóa mọi refresh token cũ trước khi cấp token mới
-    if (user.role === Role.ADMIN) {
+    // ADMIN browser login: chỉ 1 thiết bị — xóa refresh cũ. Service giữ nguyên.
+    if (bumpAdminSession) {
       await this.prisma.refreshToken.deleteMany({ where: { userId: user.id } });
     }
 

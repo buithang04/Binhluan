@@ -146,6 +146,8 @@ export const createProfileSchema = z.object({
 export const loginSchema = z.object({
   email: z.string().email(),
   password: z.string().min(1),
+  /** Server/worker login — không tăng sessionVersion (không đá Admin trên trình duyệt). */
+  service: z.boolean().optional(),
 });
 
 export const enqueueTaskSchema = z.object({

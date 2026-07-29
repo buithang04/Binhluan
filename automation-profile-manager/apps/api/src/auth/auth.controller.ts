@@ -12,7 +12,9 @@ export class AuthController {
   @Throttle({ default: { ttl: 60_000, limit: 10 } })
   async login(@Body() body: unknown) {
     const data = loginSchema.parse(body);
-    return this.auth.login(data.email, data.password);
+    return this.auth.login(data.email, data.password, {
+      service: data.service === true,
+    });
   }
 
   @Post("refresh")
