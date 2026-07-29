@@ -1170,12 +1170,136 @@ async function submitReview(frame: Frame, rating: number, human: HumanCursor) {
 }
 
 async function countReviewPhotos(frame: Frame) {
-  return frame.evaluate(
-    () =>
-      document.querySelectorAll(
-        'img[src*="googleusercontent"], img[src*="lh3."], [data-photo-id]',
-      ).length,
+  try {
+    return await frame.evaluate(() => {
+      const root =
+        (document.querySelector('[role="dialog"], [aria-modal="true"]') as HTMLElement | null) ||
+        document.body;
+      const byId = root.querySelectorAll("[data-photo-id]").length;
+      if (byId > 0) return byId;
+
+      const imgs = Array.from(
+        root.querySelectorAll(
+          'img[src*="googleusercontent"], img[src*="blob:"], img[src^="data:"]',
+        ),
+      ) as HTMLImageElement[];
+      const previews = imgs.filter((img) => {
+        const r = img.getBoundingClientRect();
+        return r.width >= 44 && r.height >= 44 && r.bottom > 0 && r.right > 0;
+      });
+      const nearAdd = root.querySelector(
+        'div.nNzjpf-cS4Vcb-PvZLI-Ueh9jd-haAclf, button[aria-label*="Thêm ảnh" i], button[aria-label*="Add photo" i]',
+      );
+      if (nearAdd) {
+        const box = (nearAdd as HTMLElement).closest("div, section, form") || root;
+        const local = Array.from(
+          box.querySelectorAll('img[src*="googleusercontent"], img[src*="blob:"]'),
+        ).filter((img) => {
+          const r = (img as HTMLElement).getBoundingClientRect();
+          return r.width >= 44 && r.height >= 44;
+        }).length;
+        if (local > 0) return local;
+      }
+      return previews.length;
+    });
+  } catch {
+    return 0;
+  }
+}
+
+/** Frame form review — ưu tiên widget WriteWidget / có textarea. */
+async function reviewFormFrames(page: Page, prefer?: Frame | null): Promise<Frame[]> {
+  const scored = await Promise.all(
+    page.frames().map(async (frame) => ({
+      frame,
+      score: await scoreReviewFrame(frame),
+    })),
   );
+  const ordered = scored
+    .filter(({ score }) => score >= 25)
+    .sort((a, b) => b.score - a.score)
+    .map(({ frame }) => frame);
+  if (prefer && !ordered.includes(prefer)) ordered.unshift(prefer);
+  return [...new Set(ordered)];
+}
+
+async function clickAddPhotoButton(frame: Frame, page: Page, human: HumanCursor) {
+  for (const ctx of await reviewFormFrames(page, frame)) {
+    const handle = await ctx
+      .$(
+        'div.nNzjpf-cS4Vcb-PvZLI-Ueh9jd-haAclf, button[aria-label*="Thêm ảnh" i], button[aria-label*="Add photo" i], button[aria-label*="Add photos" i]',
+      )
+      .catch(() => null);
+    if (handle) {
+      await human.clickElement(handle).catch(() => undefined);
+      console.log("[maps-review] đã bấm Thêm ảnh");
+      await sleep(rand(400, 700));
+      return true;
+    }
+    const clicked = await ctx
+      .evaluate(() => {
+        const btn = [...document.querySelectorAll("button, div[role='button']")].find(
+          (b) => /Thêm ảnh|Add photo|Add photos|Thêm hình/i.test(b.textContent || ""),
+        ) as HTMLElement | undefined;
+        if (!btn) return false;
+        btn.scrollIntoView({ block: "center", inline: "nearest" });
+        btn.click();
+        return true;
+      })
+      .catch(() => false);
+    if (clicked) {
+      console.log("[maps-review] đã bấm Thêm ảnh (text fallback)");
+      await sleep(rand(400, 700));
+      return true;
+    }
+  }
+  return false;
+}
+
+async function findImageFileInput(frame: Frame, page: Page) {
+  for (const ctx of await reviewFormFrames(page, frame)) {
+    try {
+      const inputs = await ctx.$$('input[type="file"]');
+      for (const input of inputs) {
+        const meta = await ctx.evaluate((el) => {
+          const accept = (el.getAttribute("accept") || "").toLowerCase();
+          const r = (el as HTMLElement).getBoundingClientRect();
+          return {
+            ok:
+              (!accept ||
+                accept.includes("image") ||
+                accept.includes("*") ||
+                accept.includes("jfif")) &&
+              (r.width > 0 || r.height > 0 || (el as HTMLInputElement).hidden),
+            multiple: el.hasAttribute("multiple"),
+          };
+        }, input);
+        if (meta.ok) return { input, multiple: meta.multiple, frame: ctx };
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return null;
+}
+
+/** Chờ preview ảnh xuất hiện sau upload. */
+async function waitPhotoPreviewIncrease(
+  page: Page,
+  frame: Frame,
+  beforeCount: number,
+  minAdded = 1,
+  timeoutMs = 30_000,
+) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    for (const ctx of await reviewFormFrames(page, frame)) {
+      const count = await countReviewPhotos(ctx);
+      if (count >= beforeCount + minAdded) return { ok: true as const, count, frame: ctx };
+    }
+    await sleep(450);
+  }
+  return { ok: false as const, count: beforeCount, frame };
 }
 
 /** Đóng hộp thoại Open — KHÔNG Escape khi đang trong form review (Escape = hỏi hủy). */
@@ -1193,28 +1317,6 @@ async function dismissNativeFileDialog(page: Page, opts?: { allowEscape?: boolea
   await sleep(200);
 }
 
-async function findImageFileInput(frame: Frame, page: Page) {
-  for (const ctx of [frame, page.mainFrame(), ...page.frames()]) {
-    try {
-      const inputs = await ctx.$$('input[type="file"]');
-      for (const input of inputs) {
-        const meta = await ctx.evaluate((el) => {
-          const accept = (el.getAttribute("accept") || "").toLowerCase();
-          return {
-            ok: !accept || accept.includes("image") || accept.includes("*") || accept.includes("jfif"),
-            multiple: el.hasAttribute("multiple"),
-          };
-        }, input);
-        if (meta.ok) return { input, multiple: meta.multiple };
-      }
-      if (inputs[0]) return { input: inputs[0], multiple: false };
-    } catch {
-      /* ignore */
-    }
-  }
-  return null;
-}
-
 /**
  * Upload ảnh không để lại hộp thoại Windows Open.
  * Ưu tiên input.uploadFile; chỉ click "Thêm ảnh" kèm waitForFileChooser + accept ngay.
@@ -1223,8 +1325,10 @@ async function uploadViaInputOrChooser(
   frame: Frame,
   page: Page,
   filePaths: string[],
+  human?: HumanCursor,
 ) {
   const found = await findImageFileInput(frame, page);
+  const uploadFrame = found?.frame ?? frame;
   if (found?.input) {
     if (found.multiple && filePaths.length > 1) {
       await found.input.uploadFile(...filePaths);
@@ -1235,25 +1339,36 @@ async function uploadViaInputOrChooser(
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
     });
-    return true;
+    return { ok: true as const, frame: uploadFrame };
   }
 
   // Chưa có input — bấm Thêm ảnh nhưng phải bắt FileChooser ngay, không để dialog treo
   const chooserPromise = page.waitForFileChooser({ timeout: 10_000 }).catch(() => null);
-  await frame.evaluate(() => {
-    const el =
-      document.querySelector(
-        'div.nNzjpf-cS4Vcb-PvZLI-Ueh9jd-haAclf, button[aria-label*="Thêm ảnh" i], button[aria-label*="Add photo" i]',
-      ) ||
-      [...document.querySelectorAll("button, div[role='button']")].find((b) =>
-        /Thêm ảnh|Add photo|Thêm hình/i.test(b.textContent || ""),
-      );
-    (el as HTMLElement | undefined)?.click();
-  });
+  if (human) {
+    await clickAddPhotoButton(frame, page, human);
+  } else {
+    for (const ctx of await reviewFormFrames(page, frame)) {
+      const clicked = await ctx
+        .evaluate(() => {
+          const el =
+            document.querySelector(
+              'div.nNzjpf-cS4Vcb-PvZLI-Ueh9jd-haAclf, button[aria-label*="Thêm ảnh" i], button[aria-label*="Add photo" i]',
+            ) ||
+            [...document.querySelectorAll("button, div[role='button']")].find((b) =>
+              /Thêm ảnh|Add photo|Thêm hình/i.test(b.textContent || ""),
+            );
+          if (!el) return false;
+          (el as HTMLElement).click();
+          return true;
+        })
+        .catch(() => false);
+      if (clicked) break;
+    }
+  }
   const chooser = await chooserPromise;
   if (chooser) {
     await chooser.accept(filePaths);
-    return true;
+    return { ok: true as const, frame: uploadFrame };
   }
 
   // Thử lại: tìm input sau click (một số UI tạo input ẩn)
@@ -1265,11 +1380,11 @@ async function uploadViaInputOrChooser(
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
     });
-    return true;
+    return { ok: true as const, frame: again.frame ?? uploadFrame };
   }
 
   await dismissNativeFileDialog(page);
-  return false;
+  return { ok: false as const, frame: uploadFrame };
 }
 
 async function addImage(
@@ -1277,30 +1392,42 @@ async function addImage(
   page: Page,
   filePath?: string | null,
   _isAdditional = false,
+  human?: HumanCursor,
 ) {
   if (!filePath || !existsSync(filePath)) return false;
   const beforeCount = await countReviewPhotos(frame);
-  const ok = await uploadViaInputOrChooser(frame, page, [filePath]);
-  if (!ok) {
+  const upload = await uploadViaInputOrChooser(frame, page, [filePath], human);
+  if (!upload.ok) {
     await dismissNativeFileDialog(page);
     return false;
   }
-  for (let i = 0; i < 25; i++) {
-    const count = await countReviewPhotos(frame);
-    if (count > beforeCount) return true;
-    await sleep(400);
-  }
+  const waited = await waitPhotoPreviewIncrease(page, upload.frame, beforeCount, 1, 25_000);
   await dismissNativeFileDialog(page);
-  return true;
+  return waited.ok;
 }
 
 /** Upload nhiều ảnh cùng lúc nếu input hỗ trợ multiple; fallback từng ảnh. */
-async function addImages(frame: Frame, page: Page, filePaths: string[]) {
-  const existing = filePaths.filter((p) => existsSync(p));
+async function addImages(
+  frame: Frame,
+  page: Page,
+  filePaths: string[],
+  human?: HumanCursor,
+) {
+  const missing = filePaths.filter((p) => p && !existsSync(p));
+  const existing = filePaths.filter((p) => p && existsSync(p));
+  if (missing.length) {
+    console.warn(`[maps-review] thiếu file ảnh trên disk: ${missing.join(", ")}`);
+  }
   if (!existing.length) return 0;
+
+  if (human) {
+    await clickAddPhotoButton(frame, page, human);
+  }
+  await sleep(rand(300, 600));
 
   const beforeCount = await countReviewPhotos(frame);
   const found = await findImageFileInput(frame, page);
+  const uploadFrame = found?.frame ?? frame;
 
   if (found?.input && found.multiple && existing.length > 1) {
     await found.input.uploadFile(...existing);
@@ -1308,36 +1435,40 @@ async function addImages(frame: Frame, page: Page, filePaths: string[]) {
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
     });
-    for (let i = 0; i < 40; i++) {
-      const count = await countReviewPhotos(frame);
-      if (count >= beforeCount + existing.length) return existing.length;
-      if (count > beforeCount && i > 15) return count - beforeCount;
-      await sleep(400);
-    }
-    const after = await countReviewPhotos(frame);
-    if (after > beforeCount) return after - beforeCount;
+    const waited = await waitPhotoPreviewIncrease(
+      page,
+      uploadFrame,
+      beforeCount,
+      existing.length,
+      35_000,
+    );
+    if (waited.ok) return existing.length;
+    const added = Math.max(0, waited.count - beforeCount);
+    if (added > 0) return added;
   }
 
   // Batch qua FileChooser (1 lần accept nhiều file) nếu chưa có multiple input
   if (existing.length > 1 && !found?.multiple) {
-    const batchOk = await uploadViaInputOrChooser(frame, page, existing);
-    if (batchOk) {
-      for (let i = 0; i < 40; i++) {
-        const count = await countReviewPhotos(frame);
-        if (count >= beforeCount + existing.length) return existing.length;
-        if (count > beforeCount && i > 15) return count - beforeCount;
-        await sleep(400);
-      }
-      const after = await countReviewPhotos(frame);
-      if (after > beforeCount) return after - beforeCount;
+    const batch = await uploadViaInputOrChooser(frame, page, existing, human);
+    if (batch.ok) {
+      const waited = await waitPhotoPreviewIncrease(
+        page,
+        batch.frame,
+        beforeCount,
+        existing.length,
+        35_000,
+      );
+      if (waited.ok) return existing.length;
+      const added = Math.max(0, waited.count - beforeCount);
+      if (added > 0) return added;
     }
   }
 
   let uploaded = 0;
   for (let i = 0; i < existing.length; i++) {
-    const ok = await addImage(frame, page, existing[i], i > 0 || uploaded > 0);
+    const ok = await addImage(frame, page, existing[i], i > 0 || uploaded > 0, human);
     if (ok) uploaded += 1;
-    await sleep(800);
+    await sleep(rand(900, 1400));
   }
   await dismissNativeFileDialog(page);
   return uploaded;
@@ -1707,17 +1838,20 @@ export async function postMapsReview(
     payload.imagePaths?.filter(Boolean) ??
     (payload.imagePath ? [payload.imagePath] : []);
   await keepFocus({ os: "window" });
+  // Frame có thể đổi sau enterReview — lấy lại trước khi upload ảnh
+  frame = (await waitReviewFrame(page, 10_000).catch(() => frame)) ?? frame;
   const uploaded = imagePaths.length
-    ? await addImages(frame, page, imagePaths)
+    ? await addImages(frame, page, imagePaths, human)
     : 0;
   if (imagePaths.length && uploaded < imagePaths.length) {
-    console.warn(
-      `[maps-review] uploaded ${uploaded}/${imagePaths.length} image(s)`,
+    throw new Error(
+      `Upload ảnh thất bại: chỉ ${uploaded}/${imagePaths.length} ảnh có preview trên form — không đăng thiếu ảnh`,
     );
-  } else if (uploaded > 0) {
-    console.log(`[maps-review] uploaded ${uploaded} image(s)`);
   }
-  await sleep(rand(800, 1500));
+  if (uploaded > 0) {
+    console.log(`[maps-review] uploaded ${uploaded} image(s) — preview đã xác minh`);
+    await sleep(rand(2500, 4000));
+  }
   await keepFocus({ os: "window" });
   await submitReview(frame, payload.rating, human);
   await keepFocus({ os: "window" });
