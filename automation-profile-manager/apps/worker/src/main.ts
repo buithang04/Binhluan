@@ -25,6 +25,8 @@ import {
 } from "./totp-login.js";
 
 // Load apps/worker/.env trước khi đọc token (tránh lệch INTERNAL_API_TOKEN với API)
+loadEnv({ path: path.resolve(__dirname, "../.env") });
+
 const FOCUS_CHROME_PS1 = path.resolve(__dirname, "../scripts/focus-chrome-window.ps1");
 const maximizedBrowsers = new WeakSet<Browser>();
 
