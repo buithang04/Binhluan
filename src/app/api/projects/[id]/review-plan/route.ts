@@ -111,9 +111,15 @@ export async function POST(req: Request, ctx: Ctx) {
   }
 
   const reviewsToPost = project.package.targetContents;
-  if (project.desiredRating == null || project.currentRating == null) {
+  const reviewCount = project.reviewCount ?? 0;
+  const hasCurrent =
+    project.currentRating != null || reviewCount <= 0;
+  if (project.desiredRating == null || !hasCurrent) {
     return NextResponse.json(
-      { error: "Cần có số sao hiện tại và số sao mong muốn trên dự án" },
+      {
+        error:
+          "Cần có số sao hiện tại và số sao mong muốn trên dự án (place chưa có review: nhập 0 lượt / để trống sao)",
+      },
       { status: 400 },
     );
   }
@@ -182,7 +188,8 @@ export async function POST(req: Request, ctx: Ctx) {
   }
 
   const planned = planReviewStars({
-    currentRating: Number(project.currentRating),
+    currentRating:
+      project.currentRating != null ? Number(project.currentRating) : 0,
     reviewCount: project.reviewCount ?? 0,
     desiredRating: Number(project.desiredRating),
     reviewsToPost,

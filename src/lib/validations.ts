@@ -12,6 +12,18 @@ const ratingSchema = z
     message: "Số sao phải từ 1.0 đến 5.0",
   });
 
+/** Sao hiện tại: cho phép 0 khi place chưa có đánh giá. */
+const currentRatingSchema = z
+  .union([z.string(), z.number(), z.null(), z.undefined()])
+  .transform((v) => {
+    if (v === null || v === undefined || v === "") return null;
+    const n = typeof v === "number" ? v : Number(v);
+    return Number.isFinite(n) ? n : NaN;
+  })
+  .refine((v) => v === null || (v >= 0 && v <= 5), {
+    message: "Số sao hiện tại phải từ 0 đến 5.0 (0 = chưa có đánh giá)",
+  });
+
 const reviewCountSchema = z
   .union([z.string(), z.number(), z.null(), z.undefined()])
   .transform((v) => {
@@ -99,7 +111,7 @@ export const projectCreateSchema = z
       }),
     packageId: z.string().min(1, "Chọn gói"),
     desiredRating: ratingSchema,
-    currentRating: ratingSchema,
+    currentRating: currentRatingSchema,
     reviewCount: reviewCountSchema,
     ratingScannedAt: z
       .union([z.string(), z.null(), z.undefined()])

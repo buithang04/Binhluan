@@ -101,6 +101,20 @@ export async function resolveGoogleMapsUrl(
   const { scrapeGoogleMapsDom } = await import("./google-maps-scraper");
   const info = await scrapeGoogleMapsDom(fast.resolvedUrl);
 
+  if (info?.reviewCount === 0) {
+    return {
+      valid: true,
+      validMessage: "Link hợp lệ — place chưa có đánh giá (0 lượt)",
+      resolvedUrl: fast.resolvedUrl,
+      info: {
+        placeName: info.placeName ?? fast.info?.placeName ?? null,
+        currentRating: info.currentRating,
+        reviewCount: 0,
+        source: "dom_scrape",
+      },
+    };
+  }
+
   if (info?.currentRating != null || info?.reviewCount != null) {
     return {
       valid: true,

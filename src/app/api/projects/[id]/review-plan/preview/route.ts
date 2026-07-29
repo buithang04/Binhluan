@@ -39,17 +39,23 @@ export async function GET(req: Request, ctx: Ctx) {
     return NextResponse.json({ error: "Không tìm thấy dự án" }, { status: 404 });
   }
 
-  if (project.desiredRating == null || project.currentRating == null) {
+  const reviewCount = project.reviewCount ?? 0;
+  const hasCurrent = project.currentRating != null || reviewCount <= 0;
+  if (project.desiredRating == null || !hasCurrent) {
     return NextResponse.json(
-      { error: "Cần có số sao hiện tại và mục tiêu" },
+      {
+        error:
+          "Cần có số sao hiện tại và mục tiêu (place chưa có review: nhập 0 lượt)",
+      },
       { status: 400 },
     );
   }
 
   const reviewsToPost = project.package.targetContents;
   const planned = planReviewStars({
-    currentRating: Number(project.currentRating),
-    reviewCount: project.reviewCount ?? 0,
+    currentRating:
+      project.currentRating != null ? Number(project.currentRating) : 0,
+    reviewCount,
     desiredRating: Number(project.desiredRating),
     reviewsToPost,
   });

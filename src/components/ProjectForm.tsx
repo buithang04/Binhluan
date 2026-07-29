@@ -224,26 +224,47 @@ export function ProjectForm({
           const scrape = await scrapeRes.json();
           if (!scrapeRes.ok || scrape.valid === false) return;
 
-          if (scrape.currentRating != null) setCurrentRating(String(scrape.currentRating));
-          if (scrape.reviewCount != null) setReviewCount(String(scrape.reviewCount));
           if (scrape.placeName) {
             setBrandName((prev) => (prev.trim() ? prev : scrape.placeName));
           }
 
-          if (scrape.currentRating != null || scrape.reviewCount != null) {
-            const scanned = new Date().toISOString();
+          const scanned = new Date().toISOString();
+          const hasRating = scrape.currentRating != null;
+          const hasCount = scrape.reviewCount != null;
+
+          if (hasCount) {
+            setReviewCount(String(scrape.reviewCount));
+          }
+          if (hasRating) {
+            setCurrentRating(String(scrape.currentRating));
+          } else if (scrape.reviewCount === 0) {
+            // Place chưa có đánh giá → không có điểm TB, dùng 0 để lập kế hoạch
+            setCurrentRating("0");
+          }
+
+          if (hasRating || hasCount) {
             setRatingScannedAt(scanned);
             setMapsStatus("ok");
-            setMapsHint(
-              `✓ Link hợp lệ · ${scrape.currentRating ?? "—"} sao · ${scrape.reviewCount ?? "—"} lượt · ${new Date(scanned).toLocaleString("vi-VN")}`,
-            );
+            if (scrape.reviewCount === 0) {
+              setMapsHint(
+                `✓ Link hợp lệ · place chưa có đánh giá (0 lượt) · ${new Date(scanned).toLocaleString("vi-VN")}`,
+              );
+            } else {
+              setMapsHint(
+                `✓ Link hợp lệ · ${scrape.currentRating ?? "—"} sao · ${scrape.reviewCount ?? "—"} lượt · ${new Date(scanned).toLocaleString("vi-VN")}`,
+              );
+            }
           } else {
             setMapsStatus("warn");
-            setMapsHint("✓ Link hợp lệ — chưa quét được sao/lượt, có thể nhập tay.");
+            setMapsHint(
+              "✓ Link hợp lệ — chưa quét được sao/lượt. Nhập tay: 0 lượt nếu place chưa có đánh giá.",
+            );
           }
         } catch {
           setMapsStatus("warn");
-          setMapsHint("✓ Link hợp lệ — quét sao chậm/lỗi, có thể nhập tay.");
+          setMapsHint(
+            "✓ Link hợp lệ — quét sao chậm/lỗi. Có thể nhập tay số sao và lượt đánh giá.",
+          );
         }
       })();
       return true;
@@ -432,13 +453,23 @@ export function ProjectForm({
 
   const starPlanPreview = useMemo(() => {
     const n = selectedPkg?.targetContents;
-    const cur = Number(currentRating);
     const des = Number(desiredRating);
-    const rc = Number(reviewCount) || 0;
-    if (!n || !Number.isFinite(cur) || !Number.isFinite(des)) return null;
+    const rc = Number(reviewCount);
+    const reviewCountNum = Number.isFinite(rc) && rc >= 0 ? rc : NaN;
+    let cur = Number(currentRating);
+    // Place 0 lượt + để trống sao → coi như 0 để xem phân bổ
+    if (
+      (!Number.isFinite(cur) || currentRating.trim() === "") &&
+      reviewCountNum === 0
+    ) {
+      cur = 0;
+    }
+    if (!n || !Number.isFinite(cur) || !Number.isFinite(des) || !Number.isFinite(reviewCountNum)) {
+      return null;
+    }
     return planReviewStars({
       currentRating: cur,
-      reviewCount: rc,
+      reviewCount: reviewCountNum,
       desiredRating: des,
       reviewsToPost: n,
     });
@@ -524,14 +555,20 @@ export function ProjectForm({
         <Field label="Số sao trung bình hiện tại" htmlFor="currentRating">
           <input
             id="currentRating"
-            type="text"
-            className="input cursor-not-allowed bg-[var(--surface-muted)] text-[var(--ink-soft)]"
+            type="number"
+            min={0}
+            max={5}
+            step={0.1}
+            className="input"
             value={currentRating}
-            readOnly
-            placeholder="Tự động điền khi kiểm tra link"
+            onChange={(e) => {
+              setCurrentRating(e.target.value);
+              setRatingScannedAt("");
+            }}
+            placeholder="VD: 4.5 — hoặc 0 nếu chưa có đánh giá"
           />
           <p className="mt-1 text-xs text-[var(--muted)]">
-            Tự động lấy từ Google Maps — không chỉnh sửa tay
+            Ưu tiên lấy từ Maps khi kiểm tra link; có thể nhập tay (0 nếu place chưa có đánh giá).
           </p>
           {ratingScannedAt && (
             <p className="mt-1 text-xs text-[var(--accent-ink)]">
@@ -542,14 +579,19 @@ export function ProjectForm({
         <Field label="Lượt đánh giá hiện tại" htmlFor="reviewCount">
           <input
             id="reviewCount"
-            type="text"
-            className="input cursor-not-allowed bg-[var(--surface-muted)] text-[var(--ink-soft)]"
+            type="number"
+            min={0}
+            step={1}
+            className="input"
             value={reviewCount}
-            readOnly
-            placeholder="Tự động điền khi kiểm tra link"
+            onChange={(e) => {
+              setReviewCount(e.target.value);
+              setRatingScannedAt("");
+            }}
+            placeholder="VD: 12 — hoặc 0 nếu chưa có đánh giá"
           />
           <p className="mt-1 text-xs text-[var(--muted)]">
-            Tự động lấy từ Google Maps — không chỉnh sửa tay
+            Ưu tiên lấy từ Maps khi kiểm tra link; có thể nhập tay.
           </p>
         </Field>
         <Field label="Số bình luận sẽ đăng" htmlFor="reviewsToPost">
@@ -783,13 +825,7 @@ export function ProjectForm({
         </div>
       )}
 
-      <div
-        className={
-          mode === "create"
-            ? "max-h-[min(65vh,36rem)] space-y-8 overflow-y-auto pr-1"
-            : "space-y-8"
-        }
-      >
+      <div className="space-y-8">
         {mode === "create" ? (
           <>
             {createStep === 1 && packageSection}

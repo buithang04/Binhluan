@@ -18,16 +18,29 @@ function toRating(v: unknown): number | null {
   return Number.isFinite(n) && n >= 1 && n <= 5 ? n : null;
 }
 
+/** Sao hiện tại — cho phép 0 khi chưa có đánh giá. */
+function toCurrentRating(v: unknown, reviewCount: number): number | null {
+  if (v == null || v === "") {
+    // Place 0 lượt: không có điểm trung bình → dùng 0 cho công thức phân bổ
+    return reviewCount <= 0 ? 0 : null;
+  }
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  if (n === 0 && reviewCount <= 0) return 0;
+  return n >= 1 && n <= 5 ? n : null;
+}
+
 /** Các điều kiện còn thiếu để tính phân bổ sao. */
 export function getStarPlanBlockers(project: ProjectForStarPlan): string[] {
   const blockers: string[] = [];
   const target = project.package?.targetContents ?? 0;
+  const reviewCount = project.reviewCount ?? 0;
   if (!target) {
     blockers.push("Chưa chọn gói hoặc gói không có số bình luận");
   }
-  if (toRating(project.currentRating) == null) {
+  if (toCurrentRating(project.currentRating, reviewCount) == null) {
     blockers.push(
-      "Thiếu số sao hiện tại — vào Chỉnh sửa dự án và kiểm tra link Google Maps",
+      "Thiếu số sao hiện tại — kiểm tra link Maps hoặc nhập tay (0 nếu chưa có đánh giá)",
     );
   }
   if (toRating(project.desiredRating) == null) {
@@ -38,9 +51,9 @@ export function getStarPlanBlockers(project: ProjectForStarPlan): string[] {
 
 export function getStarPlanInputs(project: ProjectForStarPlan) {
   const reviewsToPost = project.package?.targetContents ?? 0;
-  const currentRating = toRating(project.currentRating);
-  const desiredRating = toRating(project.desiredRating);
   const reviewCount = project.reviewCount ?? 0;
+  const currentRating = toCurrentRating(project.currentRating, reviewCount);
+  const desiredRating = toRating(project.desiredRating);
   if (!reviewsToPost || currentRating == null || desiredRating == null) {
     return null;
   }
