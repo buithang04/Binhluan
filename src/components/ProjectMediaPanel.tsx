@@ -29,6 +29,7 @@ export function ProjectMediaPanel({
   const [imageReplaced, setImageReplaced] = useState(false);
   const [saving, setSaving] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [open, setOpen] = useState(() => initialMedia.length === 0);
 
   useEffect(() => {
     setMedia(initialMedia);
@@ -182,98 +183,146 @@ export function ProjectMediaPanel({
 
   return (
     <>
-      <section className="panel space-y-4 p-5 sm:p-6">
-        <div className="flex flex-wrap items-end justify-between gap-3">
-          <div>
-            <h2 className="font-display text-lg font-semibold tracking-tight text-[var(--ink)]">
-              Thư viện ảnh ({media.length})
-            </h2>
-            <p className="mt-1 text-xs text-[var(--muted)]">
-              JPG / PNG / WebP · tối đa 5MB/ảnh · {media.length}/{MAX_PROJECT_MEDIA}
-            </p>
-          </div>
-          <div>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/jpeg,image/png,image/webp"
-              multiple
-              className="sr-only"
-              disabled={uploading || media.length >= MAX_PROJECT_MEDIA}
-              onChange={(e) => {
-                const files = e.target.files;
-                if (files?.length) void onUploadMany(files);
-                e.target.value = "";
-              }}
-            />
-            <button
-              type="button"
-              className="btn btn-primary"
-              disabled={uploading || media.length >= MAX_PROJECT_MEDIA}
-              onClick={() => fileInputRef.current?.click()}
-            >
-              {uploading ? "Đang tải…" : "+ Thêm ảnh"}
-            </button>
-          </div>
-        </div>
-
-        {error && !editing && (
-          <p className="text-sm text-[var(--danger)]">{error}</p>
-        )}
-
-        {media.length === 0 ? (
+      <section className="panel overflow-hidden">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--line)] px-4 py-3 sm:px-5">
           <button
             type="button"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={uploading}
-            className="flex min-h-[7rem] w-full cursor-pointer flex-col items-center justify-center gap-2 rounded-[var(--radius)] border border-dashed border-[var(--line)] bg-[var(--surface-muted)] px-4 py-6 text-center transition hover:border-[var(--accent)] hover:bg-[var(--accent-soft)]/40 disabled:cursor-not-allowed disabled:opacity-60"
+            className="flex min-w-0 flex-1 items-center gap-3 text-left"
+            onClick={() => setOpen((v) => !v)}
+            aria-expanded={open}
           >
-            <span className="text-sm font-medium text-[var(--ink)]">
-              Chưa có ảnh — bấm để thêm
-            </span>
-            <span className="text-xs text-[var(--muted)]">
-              Hoặc kéo thả ảnh vào lưới bên dưới
+            <div className="min-w-0">
+              <h2 className="font-display text-base font-semibold tracking-tight text-[var(--ink)]">
+                Thư viện ảnh ({media.length}/{MAX_PROJECT_MEDIA})
+              </h2>
+              {!open && (
+                <p className="mt-0.5 truncate text-xs text-[var(--muted)]">
+                  {media.length === 0
+                    ? "Chưa có ảnh — bấm để mở và thêm"
+                    : `${media.length} ảnh · JPG/PNG/WebP · bấm để mở`}
+                </p>
+              )}
+            </div>
+            <span
+              className={`shrink-0 text-sm text-[var(--muted)] transition-transform ${
+                open ? "rotate-180" : ""
+              }`}
+              aria-hidden
+            >
+              ▼
             </span>
           </button>
-        ) : (
-          <div
-            className="grid grid-cols-2 gap-3 sm:grid-cols-4 md:grid-cols-5"
-            onDragOver={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-            }}
-            onDrop={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              if (uploading || media.length >= MAX_PROJECT_MEDIA) return;
-              const files = e.dataTransfer.files;
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/jpeg,image/png,image/webp"
+            multiple
+            className="sr-only"
+            disabled={uploading || media.length >= MAX_PROJECT_MEDIA}
+            onChange={(e) => {
+              const files = e.target.files;
               if (files?.length) void onUploadMany(files);
+              e.target.value = "";
+            }}
+          />
+          <button
+            type="button"
+            className="btn btn-primary btn-sm shrink-0"
+            disabled={uploading || media.length >= MAX_PROJECT_MEDIA}
+            onClick={() => {
+              setOpen(true);
+              fileInputRef.current?.click();
             }}
           >
-            {media.map((m) => (
+            {uploading ? "Đang tải…" : "+ Thêm ảnh"}
+          </button>
+        </div>
+
+        {!open && media.length > 0 && (
+          <div className="flex gap-1.5 overflow-x-auto px-4 py-2.5 sm:px-5">
+            {media.slice(0, 12).map((m) => (
               <button
                 key={m.id}
                 type="button"
-                onClick={() => openEdit(m)}
-                className="group relative aspect-square overflow-hidden rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-muted)] text-left shadow-sm transition hover:-translate-y-0.5 hover:border-[var(--accent)] hover:shadow-md"
+                onClick={() => {
+                  setOpen(true);
+                  openEdit(m);
+                }}
+                className="h-10 w-10 shrink-0 overflow-hidden rounded-md border border-[var(--line)]"
+                title={m.caption || m.fileName || "Ảnh"}
               >
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={m.filePath}
-                  alt={m.caption || ""}
-                  className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.03]"
-                />
-                <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/10 to-transparent opacity-80 transition group-hover:opacity-100" />
-                <div className="absolute inset-x-0 bottom-0 p-2.5">
-                  <span className="block truncate text-xs font-medium text-white">
-                    {m.caption || "Ảnh dự án"}
-                  </span>
-                  <span className="mt-0.5 block text-xs text-white/65">
-                    Chỉnh sửa
-                  </span>
-                </div>
+                <img src={m.filePath} alt="" className="h-full w-full object-cover" />
               </button>
             ))}
+            {media.length > 12 && (
+              <button
+                type="button"
+                onClick={() => setOpen(true)}
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-dashed border-[var(--line)] text-xs text-[var(--muted)]"
+              >
+                +{media.length - 12}
+              </button>
+            )}
+          </div>
+        )}
+
+        {open && (
+          <div className="space-y-3 p-4 sm:p-5">
+            <p className="text-xs text-[var(--muted)]">
+              JPG / PNG / WebP · tối đa 5MB/ảnh · kéo thả để thêm
+            </p>
+
+            {error && !editing && (
+              <p className="text-sm text-[var(--danger)]">{error}</p>
+            )}
+
+            {media.length === 0 ? (
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploading}
+                className="flex min-h-[5rem] w-full cursor-pointer flex-col items-center justify-center gap-1 rounded-[var(--radius-sm)] border border-dashed border-[var(--line)] bg-[var(--surface-muted)] px-4 py-4 text-center transition hover:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <span className="text-sm text-[var(--ink)]">Chưa có ảnh — bấm để thêm</span>
+              </button>
+            ) : (
+              <div
+                className="grid grid-cols-3 gap-2 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8"
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  if (uploading || media.length >= MAX_PROJECT_MEDIA) return;
+                  const files = e.dataTransfer.files;
+                  if (files?.length) void onUploadMany(files);
+                }}
+              >
+                {media.map((m) => (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onClick={() => openEdit(m)}
+                    className="group relative aspect-square overflow-hidden rounded-[var(--radius-sm)] border border-[var(--line)] bg-[var(--surface-muted)] text-left transition hover:border-[var(--accent)]"
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={m.filePath}
+                      alt={m.caption || ""}
+                      className="h-full w-full object-cover"
+                    />
+                    {m.caption ? (
+                      <div className="absolute inset-x-0 bottom-0 truncate bg-black/60 px-1 py-0.5 text-[10px] text-white">
+                        {m.caption}
+                      </div>
+                    ) : null}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </section>
