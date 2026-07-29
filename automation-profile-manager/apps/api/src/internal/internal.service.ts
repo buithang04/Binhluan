@@ -69,6 +69,14 @@ export class InternalService {
     if (!jobRun || jobRun.profileId !== profile.id) {
       throw new BadRequestException("Job not found for profile");
     }
+    // Job đã finalize (auto-recover/reset) — job BullMQ cũ không được chạy lại
+    if (
+      jobRun.status === "FAILED" ||
+      jobRun.status === "COMPLETED" ||
+      jobRun.status === "DEAD"
+    ) {
+      throw new BadRequestException("Job already finalized");
+    }
 
     await this.prisma.$transaction([
       this.prisma.profile.update({

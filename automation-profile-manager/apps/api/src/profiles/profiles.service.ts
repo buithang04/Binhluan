@@ -274,8 +274,13 @@ export class ProfilesService {
 
     const leaseToken = randomUUID();
     // LOGIN có captcha/verify — lease dài; task khác 5 phút
+    // MAPS_REVIEW chạy 5–15 phút (gõ như người) — lease phải dài hơn job timeout
     const leaseMs =
-      taskCode === "LOGIN" ? 45 * 60 * 1000 : 5 * 60 * 1000;
+      taskCode === "LOGIN"
+        ? 45 * 60 * 1000
+        : taskCode === "MAPS_REVIEW"
+          ? 30 * 60 * 1000
+          : 5 * 60 * 1000;
     const leaseUntil = new Date(Date.now() + leaseMs);
 
     const jobRun = await this.prisma.$transaction(async (tx) => {

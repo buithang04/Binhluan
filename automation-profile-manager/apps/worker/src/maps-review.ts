@@ -898,7 +898,26 @@ async function prepareReviewForm(frame: Frame) {
   await sleep(200);
 }
 
+/** Tìm ô nhập trên MỌI frame form review — form Maps hay đổi frame sau khi chọn sao. */
 async function enterReview(frame: Frame, text: string, human: HumanCursor) {
+  const body = text.trim();
+  if (!body) throw new Error("Nội dung đánh giá trống");
+  const page = frame.page();
+  const frames = await reviewFormFrames(page, frame).catch(() => [frame]);
+  const candidates = frames.length ? frames : [frame];
+  for (const ctx of candidates) {
+    const ok = await enterReviewInFrame(ctx, body, human).catch((e) => {
+      console.warn(
+        `[maps-review] enterReview frame lỗi: ${e instanceof Error ? e.message : e}`,
+      );
+      return false;
+    });
+    if (ok) return;
+  }
+  throw new Error("Không nhập được bình luận");
+}
+
+async function enterReviewInFrame(frame: Frame, body: string, human: HumanCursor) {
   const selectors = [
     'textarea[aria-label="Nhập bài đánh giá"]',
     'textarea[aria-label*="đánh giá" i]',
@@ -913,13 +932,11 @@ async function enterReview(frame: Frame, text: string, human: HumanCursor) {
     'div[contenteditable="true"][aria-label*="review" i]',
     'div[role="textbox"][contenteditable="true"]',
   ];
-  const body = text.trim();
-  if (!body) throw new Error("Nội dung đánh giá trống");
   const minFilled = Math.min(8, body.length);
 
   // Chờ ô nhập xuất hiện
   const waitStart = Date.now();
-  while (Date.now() - waitStart < 10_000) {
+  while (Date.now() - waitStart < 8_000) {
     const has = await frame
       .evaluate(
         () =>
@@ -977,7 +994,8 @@ async function enterReview(frame: Frame, text: string, human: HumanCursor) {
       .evaluate((s) => (document.querySelector(s) as HTMLElement | null)?.focus(), sel)
       .catch(() => undefined);
 
-    // 3) Xóa nội dung cũ + gõ từng ký tự (nhịp người)
+    // 3) Xóa nội dung cũ + gõ từng ký tự (nhịp người, bài dài gõ nhanh hơn,
+    //    có deadline cứng — quá hạn thì dừng gõ và set thẳng value)
     const page = frame.page();
     await page.keyboard.down("Control");
     await page.keyboard.press("KeyA");
@@ -985,13 +1003,23 @@ async function enterReview(frame: Frame, text: string, human: HumanCursor) {
     await sleep(rand(120, 260));
     await page.keyboard.press("Backspace");
     await sleep(rand(150, 320));
+    const speed = body.length > 160 ? 0.45 : body.length > 90 ? 0.7 : 1;
+    const typingDeadline = Date.now() + 90_000;
+    let typedAll = true;
     for (let i = 0; i < body.length; i++) {
+      if (Date.now() > typingDeadline) {
+        console.warn(
+          "[maps-review] gõ quá 90s — dừng gõ tay, set thẳng nội dung",
+        );
+        typedAll = false;
+        break;
+      }
       const ch = body[i]!;
       await page.keyboard.type(ch, { delay: 0 });
       let delay = rand(90, 220);
       if (" .,!?;:\n".includes(ch)) delay += rand(60, 180);
       if (i > 0 && i % randInt(6, 12) === 0) delay += rand(150, 420);
-      await sleep(delay);
+      await sleep(delay * speed);
     }
 
     await frame
@@ -1004,9 +1032,9 @@ async function enterReview(frame: Frame, text: string, human: HumanCursor) {
       .catch(() => undefined);
     await sleep(rand(300, 600));
 
-    if ((await filledLen(sel)) >= minFilled) {
+    if (typedAll && (await filledLen(sel)) >= minFilled) {
       console.log(`[maps-review] đã nhập bình luận (gõ tay, focus JS)`);
-      return;
+      return true;
     }
 
     // 4) Fallback cuối: set value trực tiếp (textarea hoặc contenteditable)
@@ -1037,10 +1065,10 @@ async function enterReview(frame: Frame, text: string, human: HumanCursor) {
     await sleep(rand(300, 600));
     if ((await filledLen(sel)) >= minFilled) {
       console.log(`[maps-review] đã nhập bình luận (fallback set value)`);
-      return;
+      return true;
     }
   }
-  throw new Error("Không nhập được bình luận");
+  return false;
 }
 
 /** Chờ nút Đăng (jsname=IJM3w) sẵn sàng — trước hết đóng hộp hỏi hủy nếu có. */
@@ -1134,7 +1162,19 @@ async function clickPostButton(frame: Frame, human: HumanCursor) {
   return true;
 }
 
+/** Nút Đăng có thể nằm ở frame khác sau khi form đổi bước — tìm đúng frame trước. */
+async function resolveSubmitFrame(frame: Frame): Promise<Frame> {
+  const page = frame.page();
+  const frames = await reviewFormFrames(page, frame).catch(() => [frame]);
+  for (const ctx of frames.length ? frames : [frame]) {
+    const btn = await ctx.$('button[jsname="IJM3w"]').catch(() => null);
+    if (btn) return ctx;
+  }
+  return frame;
+}
+
 async function submitReview(frame: Frame, rating: number, human: HumanCursor) {
+  frame = await resolveSubmitFrame(frame);
   await prepareReviewForm(frame);
   const ready = await waitPostButtonEnabled(frame, rating, 45_000);
   if (!ready) {

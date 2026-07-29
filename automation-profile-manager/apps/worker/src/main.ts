@@ -2365,6 +2365,32 @@ async function runMapsReviewJob(claim: ClaimPayload, job: ProfileTaskJob) {
   };
 }
 
+/** Timeout cứng theo task — 1 job treo (CDP đơ, dialog nền…) không được chặn cả hàng đợi. */
+const TASK_TIMEOUT_MS: Record<string, number> = {
+  MAPS_REVIEW: Math.max(120_000, Number(process.env.MAPS_REVIEW_TIMEOUT_MS || 10 * 60_000)),
+  HEALTHCHECK: 4 * 60_000,
+  BROWSER_CHECK: 4 * 60_000,
+  LOGIN: 45 * 60_000,
+};
+
+function runWithTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout;
+  return Promise.race([
+    p.finally(() => clearTimeout(timer)),
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () =>
+          reject(
+            new Error(
+              `${label} treo quá ${Math.round(ms / 60_000)} phút — tự hủy job để không chặn hàng đợi`,
+            ),
+          ),
+        ms,
+      );
+    }),
+  ]);
+}
+
 async function processJob(job: ProfileTaskJob) {
   const claim = await api<ClaimPayload>("/internal/jobs/claim", {
     profileId: job.profileId,
@@ -2389,17 +2415,23 @@ async function processJob(job: ProfileTaskJob) {
   try {
     if (job.taskCode === "LOGIN") markLoginBusy(true);
     if (job.taskCode === "MAPS_REVIEW") markMapsBusy(true);
-    const out =
+    const taskTimeoutMs = TASK_TIMEOUT_MS[job.taskCode] ?? 10 * 60_000;
+    const taskPromise: Promise<unknown> =
       job.taskCode === "LOGIN"
-        ? await runGoogleLogin(claim, {
+        ? runGoogleLogin(claim, {
             leaseToken: job.leaseToken,
             jobRunId: job.jobRunId,
           })
         : job.taskCode === "BROWSER_CHECK"
-          ? await runBrowserCheck(claim)
+          ? runBrowserCheck(claim)
           : job.taskCode === "MAPS_REVIEW"
-            ? await runMapsReviewJob(claim, job)
-            : await runHealthcheck(claim);
+            ? runMapsReviewJob(claim, job)
+            : runHealthcheck(claim);
+    const out = await runWithTimeout(
+      taskPromise,
+      taskTimeoutMs,
+      `${job.taskCode} #${claim.profile.browserIndex}`,
+    );
 
     const loginOut = out as {
       keepAlive?: boolean;

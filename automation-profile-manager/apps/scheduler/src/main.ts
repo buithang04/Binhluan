@@ -12,13 +12,29 @@ async function tick(queue: Queue<ProfileTaskJob>) {
   const leaseUntil = new Date(now.getTime() + 5 * 60 * 1000);
 
   const claimed = await prisma.$transaction(async (tx) => {
+    // Không healthcheck profile sắp/đang đăng review (tránh chiếm slot đúng giờ đăng)
+    const reviewSoon = new Date(now.getTime() + 30 * 60 * 1000);
     const rows = await tx.$queryRaw<Array<{ id: string }>>`
-      SELECT id FROM "Profile"
-      WHERE status = 'READY'
-        AND "browserAlive" = true
-        AND "nextRun" <= ${now}
-        AND ("leaseUntil" IS NULL OR "leaseUntil" < ${now})
-      ORDER BY "nextRun" ASC
+      SELECT id FROM "Profile" p
+      WHERE p.status = 'READY'
+        AND p."browserAlive" = true
+        AND p."nextRun" <= ${now}
+        AND (p."leaseUntil" IS NULL OR p."leaseUntil" < ${now})
+        AND NOT EXISTS (
+          SELECT 1 FROM "ReviewAssignment" ra
+          JOIN "ReviewPlan" rp ON ra."planId" = rp.id
+          WHERE ra."apmProfileId" = p.id
+            AND rp.status = 'RUNNING'
+            AND (
+              ra.status IN ('QUEUED', 'RUNNING')
+              OR (
+                ra.status = 'PENDING'
+                AND ra."scheduledAt" IS NOT NULL
+                AND ra."scheduledAt" <= ${reviewSoon}
+              )
+            )
+        )
+      ORDER BY p."nextRun" ASC
       LIMIT ${BATCH}
       FOR UPDATE SKIP LOCKED
     `;

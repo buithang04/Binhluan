@@ -281,6 +281,113 @@ async function enqueueOneAssignment(
   }
 }
 
+/** Bài kẹt QUEUED/RUNNING do job chết/treo (worker restart, 401, timeout…) sẽ
+ *  không bao giờ tự chạy lại vì auto-dispatch chỉ nhặt PENDING. Tự phục hồi:
+ *  - Job đã FAILED/DEAD/COMPLETED mà bài chưa cập nhật → reset PENDING
+ *  - QUEUED >12 phút mà job chưa được claim (PENDING/không có job) → reset
+ *  - RUNNING >25 phút (job timeout của worker là 10 phút) → job treo → reset
+ *  Đồng thời finalize JobRun cũ (job BullMQ cũ bị chặn claim lại) + nhả profile. */
+async function recoverStuckAssignments(now: Date): Promise<void> {
+  const STALE_QUEUED_MS = 12 * 60_000;
+  const STALE_RUNNING_MS = 25 * 60_000;
+
+  const stuck = await prisma.reviewAssignment.findMany({
+    where: {
+      status: { in: ["QUEUED", "RUNNING"] },
+      plan: { status: "RUNNING" },
+    },
+    select: {
+      id: true,
+      status: true,
+      sortOrder: true,
+      apmJobRunId: true,
+      apmProfileId: true,
+      updatedAt: true,
+    },
+  });
+  if (!stuck.length) return;
+
+  const jobIds = stuck
+    .map((s) => s.apmJobRunId)
+    .filter((id): id is string => Boolean(id));
+  const jobs = jobIds.length
+    ? await prisma.jobRun.findMany({
+        where: { id: { in: jobIds } },
+        select: { id: true, status: true, startedAt: true, createdAt: true },
+      })
+    : [];
+  const jobById = new Map(jobs.map((j) => [j.id, j]));
+
+  let recovered = 0;
+  for (const a of stuck) {
+    const job = a.apmJobRunId ? jobById.get(a.apmJobRunId) : undefined;
+    const ageMs = now.getTime() - a.updatedAt.getTime();
+
+    const jobFinalized =
+      job && ["FAILED", "DEAD", "COMPLETED"].includes(job.status);
+    const queuedStale =
+      a.status === "QUEUED" &&
+      (!job || job.status === "PENDING") &&
+      ageMs > STALE_QUEUED_MS;
+    const runningStale =
+      a.status === "RUNNING" &&
+      (!job ||
+        (job.status === "ACTIVE" &&
+          (job.startedAt ?? job.createdAt) &&
+          now.getTime() - (job.startedAt ?? job.createdAt).getTime() >
+            STALE_RUNNING_MS)) &&
+      ageMs > STALE_RUNNING_MS;
+
+    if (!jobFinalized && !queuedStale && !runningStale) continue;
+
+    // Finalize job cũ để BullMQ job còn trong queue không claim lại (claim guard)
+    if (job && (job.status === "PENDING" || job.status === "ACTIVE")) {
+      await prisma.jobRun
+        .update({
+          where: { id: job.id },
+          data: {
+            status: "FAILED",
+            finishedAt: now,
+            error: "Auto-recover: job kẹt/treo — reset bài về PENDING để đăng lại",
+          },
+        })
+        .catch(() => undefined);
+    }
+
+    await prisma.reviewAssignment.update({
+      where: { id: a.id },
+      data: { status: "PENDING", apmJobRunId: null, error: null },
+    });
+
+    // Nhả profile nếu còn kẹt QUEUED/RUNNING với lease đã hết hạn
+    if (a.apmProfileId) {
+      await prisma.profile
+        .updateMany({
+          where: {
+            id: a.apmProfileId,
+            status: { in: ["QUEUED", "RUNNING"] },
+            OR: [{ leaseUntil: null }, { leaseUntil: { lt: now } }],
+          },
+          data: {
+            status: "READY",
+            leaseToken: null,
+            leaseUntil: null,
+            currentTask: null,
+          },
+        })
+        .catch(() => undefined);
+    }
+
+    console.log(
+      `[review-dispatch] auto-recover #${a.sortOrder + 1}: ${a.status} kẹt (job=${job?.status ?? "mất"}) → PENDING, sẽ đăng lại theo lịch`,
+    );
+    recovered += 1;
+  }
+  if (recovered) {
+    console.log(`[review-dispatch] đã phục hồi ${recovered} bài kẹt`);
+  }
+}
+
 /** Enqueue bài PENDING đang trong cửa sổ lịch đăng (không dump quá hạn / FAILED).
  *  Quá hạn hoặc FAILED → lập lại lịch hoặc gọi với `assignmentId` (Đăng tay).
  *  Mặc định: min(proxy khả dụng, WORKER_CONCURRENCY) bài/tick. */
@@ -293,6 +400,13 @@ export async function dispatchDueReviewAssignments(options?: {
   autoContinue?: boolean;
 }): Promise<DispatchResult> {
   const now = new Date();
+
+  await recoverStuckAssignments(now).catch((e) =>
+    console.warn(
+      "[review-dispatch] recover lỗi:",
+      e instanceof Error ? e.message : e,
+    ),
+  );
 
   const proxyCount = await countAvailableProxies(now);
   if (proxyCount === 0 && !options?.assignmentId) {
