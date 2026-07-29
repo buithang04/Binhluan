@@ -10,9 +10,13 @@ import {
   resolveReviewTextForStar,
   availableReviewProfileWhere,
   prioritizeProfilesWith2Fa,
+  pickProfilesForReviewPlan,
 } from "@/lib/review-content";
 import { pickRandomMediaAssets, enrichPlanAssignments } from "@/lib/review-media";
-import { planReviewScheduleDates } from "@/lib/review-schedule";
+import {
+  adjustScheduleForProfileReuse,
+  planReviewScheduleDates,
+} from "@/lib/review-schedule";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -168,21 +172,31 @@ export async function POST(req: Request, ctx: Ctx) {
       include: { account: { select: { email: true, totpSecretEnc: true } } },
     }),
   );
-  const usedEmails = new Set(
-    completedKeep.map((a) => a.profileEmail).filter(Boolean) as string[],
-  );
-  const readyProfiles = pool
-    .filter((p) => !usedEmails.has(p.account.email))
-    .slice(0, remainingSlots);
 
-  if (readyProfiles.length < remainingSlots) {
+  if (pool.length === 0) {
     return NextResponse.json(
-      {
-        error: `Cần ${remainingSlots} mail READY còn trống (đã giữ ${completedKeep.length} bài hoàn thành), hiện có ${readyProfiles.length}`,
-      },
+      { error: "Cần ít nhất 1 mail READY (không đang lock) để lập kế hoạch" },
       { status: 400 },
     );
   }
+
+  const assignedProfiles = pickProfilesForReviewPlan(
+    pool,
+    remainingSlots,
+    completedKeep.length,
+  );
+  const uniqueProfileCount = new Set(assignedProfiles.map((p) => p.id)).size;
+  const reusingProfiles = uniqueProfileCount < remainingSlots;
+
+  const minProfileGapMs = Math.max(
+    (project.proxyCooldownMinutes ?? 60) * 60_000,
+    6 * 60 * 60_000,
+  );
+  const scheduleDates = adjustScheduleForProfileReuse(
+    planReviewScheduleDates(project.startAt, project.endAt, reviewsToPost),
+    pickProfilesForReviewPlan(pool, reviewsToPost, 0).map((p) => p.id),
+    minProfileGapMs,
+  );
 
   const planned = planReviewStars({
     currentRating:
@@ -214,12 +228,6 @@ export async function POST(req: Request, ctx: Ctx) {
     );
   }
 
-  const scheduleDates = planReviewScheduleDates(
-    project.startAt,
-    project.endAt,
-    reviewsToPost,
-  );
-
   const newAssignmentsData = newSlots.map((slot, i) => {
     const globalIndex = completedKeep.length + i;
     const reviewText = resolveReviewTextForStar(
@@ -229,7 +237,7 @@ export async function POST(req: Request, ctx: Ctx) {
       project.brandName,
     );
     const pickedMedia = media.length ? pickRandomMediaAssets(media) : [];
-    const profile = readyProfiles[i]!;
+    const profile = assignedProfiles[i]!;
     return {
       sortOrder: globalIndex,
       stars: slot.stars,
@@ -285,7 +293,9 @@ export async function POST(req: Request, ctx: Ctx) {
           status: existingPlan.status === "RUNNING" ? "RUNNING" : "READY",
           snapshot: {
             ...planned,
-            profileCount: readyProfiles.length + completedKeep.length,
+            profileCount: uniqueProfileCount,
+            profilesAssigned: assignedProfiles.length,
+            profileReuse: reusingProfiles,
             ratingScannedAt: project.ratingScannedAt,
             completedKept: completedKeep.length,
             remainingPlanned: newAssignmentsData.length,
@@ -308,7 +318,9 @@ export async function POST(req: Request, ctx: Ctx) {
         status: "READY",
         snapshot: {
           ...planned,
-          profileCount: readyProfiles.length,
+          profileCount: uniqueProfileCount,
+          profilesAssigned: assignedProfiles.length,
+          profileReuse: reusingProfiles,
           ratingScannedAt: project.ratingScannedAt,
           completedKept: 0,
           remainingPlanned: newAssignmentsData.length,
@@ -338,7 +350,13 @@ export async function POST(req: Request, ctx: Ctx) {
     planned,
     message:
       completedKeep.length > 0
-        ? `Đã giữ ${completedKeep.length} bài hoàn thành, lập lại ${newAssignmentsData.length} bài còn lại`
-        : undefined,
+        ? `Đã giữ ${completedKeep.length} bài hoàn thành, lập lại ${newAssignmentsData.length} bài còn lại${
+            reusingProfiles
+              ? ` (tái sử dụng ${uniqueProfileCount} mail — lịch cách nhau ≥6h)`
+              : ""
+          }`
+        : reusingProfiles
+          ? `Đã lập kế hoạch — tái sử dụng ${uniqueProfileCount}/${remainingSlots} mail (lịch cách nhau ≥6h)`
+          : undefined,
   });
 }

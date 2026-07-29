@@ -141,6 +141,17 @@ export function prioritizeProfilesWith2Fa<
   return [...shuffleInPlace(with2fa), ...shuffleInPlace(without2fa)];
 }
 
+/** Gán profile cho từng bài — thiếu mail thì xoay vòng (1 mail có thể nhiều bài). */
+export function pickProfilesForReviewPlan<
+  T extends { id: string; account: { email: string } },
+>(pool: T[], count: number, startIndex = 0): T[] {
+  if (count <= 0 || pool.length === 0) return [];
+  return Array.from(
+    { length: count },
+    (_, i) => pool[(startIndex + i) % pool.length]!,
+  );
+}
+
 /** Resolve 1 bình luận hoàn chỉnh từ spin template theo sao. */
 export function resolveReviewTextForStar(
   stars: number,

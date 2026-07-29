@@ -68,6 +68,38 @@ export function planReviewScheduleDates(
   return slots.sort((a, b) => a.getTime() - b.getTime());
 }
 
+/** Cùng profile nhiều bài → đẩy lịch sau cách nhau tối thiểu minGapMs. */
+export function adjustScheduleForProfileReuse(
+  times: Date[],
+  profileIds: string[],
+  minGapMs: number,
+): Date[] {
+  if (times.length !== profileIds.length || minGapMs <= 0) return times;
+  const out = times.map((t) => new Date(t.getTime()));
+
+  const byProfile = new Map<string, number[]>();
+  profileIds.forEach((id, i) => {
+    const list = byProfile.get(id) ?? [];
+    list.push(i);
+    byProfile.set(id, list);
+  });
+
+  for (const indices of byProfile.values()) {
+    if (indices.length < 2) continue;
+    indices.sort((a, b) => out[a]!.getTime() - out[b]!.getTime());
+    for (let j = 1; j < indices.length; j++) {
+      const prevIdx = indices[j - 1]!;
+      const idx = indices[j]!;
+      const minNext = out[prevIdx]!.getTime() + minGapMs;
+      if (out[idx]!.getTime() < minNext) {
+        out[idx] = new Date(minNext);
+      }
+    }
+  }
+
+  return out;
+}
+
 export function formatScheduleDate(value: string | Date | null | undefined): string {
   if (!value) return "—";
   const d = typeof value === "string" ? new Date(value) : value;

@@ -356,12 +356,9 @@ export function ReviewPlanPanel({
         "Chưa sinh nội dung bình luận theo sao — làm ở phần Nội dung bình luận phía trên",
       );
     }
-    if (
-      readyProfileCount != null &&
-      readyProfileCount < packageTargetContents
-    ) {
+    if (readyProfileCount != null && readyProfileCount === 0) {
       planBlockers.push(
-        `Cần ${packageTargetContents} mail READY (không đang lock), hiện có ${readyProfileCount}`,
+        "Cần ít nhất 1 mail READY (không đang lock) để lập kế hoạch",
       );
     }
     if (mediaCount === 0) {
@@ -605,7 +602,10 @@ export function ReviewPlanPanel({
           </p>
           {readyProfileCount != null && (
             <p className="mt-1 text-xs text-[var(--muted)]">
-              Account sẵn sàng: {readyProfileCount} / {packageTargetContents}
+              Account sẵn sàng: {readyProfileCount}
+              {readyProfileCount < packageTargetContents
+                ? ` (thiếu ${packageTargetContents} — sẽ tái sử dụng mail, lịch cách nhau ≥6h)`
+                : ` / ${packageTargetContents}`}
               {contentGenerated ? " · Nội dung đã sinh" : " · Chưa sinh nội dung"}
               {mediaCount > 0 ? ` · Thư viện: ${mediaCount} ảnh` : ""}
               {availableProxyCount != null
