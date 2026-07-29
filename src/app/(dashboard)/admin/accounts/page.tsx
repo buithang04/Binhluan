@@ -67,7 +67,6 @@ function isWaitingManualSolve(issue?: string | null): boolean {
 function needsLiveStatus(list: Account[]): boolean {
   return list.some(
     (a) =>
-      a.status !== "READY" ||
       a.loginIssue ||
       a.profile?.browserAlive ||
       a.profile?.status === "QUEUED" ||
@@ -249,7 +248,7 @@ export default function AdminAccountsPage() {
         return current;
       });
     };
-    const t = setInterval(tick, 8_000);
+    const t = setInterval(tick, 15_000);
     const onVis = () => {
       if (!document.hidden) void load({ silent: true });
     };
