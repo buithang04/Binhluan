@@ -1816,12 +1816,14 @@ export async function postMapsReview(
   const human = new HumanCursor(page);
   await human.init();
 
+  console.log(`[maps-review] goto placeUrl…`);
   await keepFocus({ os: "launch" });
   await page.goto(payload.placeUrl, {
     waitUntil: "domcontentloaded",
     timeout: 60_000,
   });
-  await sleep(rand(2200, 3800));
+  console.log(`[maps-review] place loaded → warmUp`);
+  await sleep(rand(1200, 2000));
   await keepFocus({ os: "window" });
   await human.warmUp();
 
@@ -1842,8 +1844,10 @@ export async function postMapsReview(
   }
 
   await keepFocus({ os: "window" });
+  console.log(`[maps-review] thử rate trên place panel (${payload.rating}★)`);
   // Ưu tiên bấm sao trên panel place (thường mở form + đã chọn sao)
   const ratedOnPlace = await tryRateOnPlacePanel(page, payload.rating, human);
+  console.log(`[maps-review] ratedOnPlace=${ratedOnPlace}`);
   await sleep(rand(600, 1100));
 
   // Nếu chưa thấy form → bấm "Viết bài đánh giá"
@@ -1854,10 +1858,12 @@ export async function postMapsReview(
     frame = null;
   }
   if (!frame) {
+    console.log(`[maps-review] chưa thấy form — bấm Viết bài đánh giá`);
     await clickReviewButton(page, human);
     await sleep(rand(1200, 2000));
     frame = await waitReviewFrame(page);
   }
+  console.log(`[maps-review] có form frame → selectStar`);
   await keepFocus({ os: "window" });
 
   // Chọn / xác nhận sao trên mọi frame (iframe widget + dialog)

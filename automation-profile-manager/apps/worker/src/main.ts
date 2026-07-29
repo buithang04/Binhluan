@@ -492,9 +492,10 @@ async function launchBrowser(
  */
 async function connectOrLaunchBrowser(
   claim: ClaimPayload,
-  opts?: { useProxy?: boolean },
+  opts?: { useProxy?: boolean; neverKill?: boolean },
 ): Promise<{ browser: Browser; reused: boolean; mode: string; pid?: number }> {
   const wantProxy = opts?.useProxy ?? TASK_USE_PROXY;
+  const neverKill = opts?.neverKill === true;
   const live = browserPool.get(claim.profile.id);
   if (live?.browser.connected) {
     const pathMismatch =
@@ -510,6 +511,13 @@ async function connectOrLaunchBrowser(
       Boolean(live.proxyEnabled) !== wantProxy ||
       (wantProxy && liveProxyId !== wantProxyId);
     if (pathMismatch || emailMismatch || proxyMismatch) {
+      if (neverKill) {
+        // MAPS: giữ nguyên Chrome pool dù lệch proxy
+        console.warn(
+          `[worker] #${claim.profile.browserIndex} pool lệch proxy/path nhưng neverKill — reuse nguyên`,
+        );
+        return { browser: live.browser, reused: true, mode: "pool-forced", pid: live.pid };
+      }
       const proxyLabel =
         wantProxy && claim.proxy
           ? `${claim.proxy.host}:${claim.proxy.port}`
@@ -593,7 +601,12 @@ async function connectOrLaunchBrowser(
       await new Promise((r) => setTimeout(r, 400));
     }
 
-    // Không reconnect được / proxy lệch → kill (có log rõ)
+    // Không reconnect được / proxy lệch → kill (có log rõ) — trừ neverKill (MAPS)
+    if (neverKill) {
+      throw new Error(
+        `#${claim.profile.browserIndex}: Chrome đang mở nhưng không reconnect/khớp proxy — neverKill, không tự tắt cửa sổ`,
+      );
+    }
     console.log(
       `[worker] #${claim.profile.browserIndex} profile dir locked — kill orphan rồi launch (proxy=${wantProxy ? wantLabel ?? "ON" : "OFF"})`,
     );
@@ -625,8 +638,13 @@ async function connectOrLaunchBrowser(
           );
           return { browser, reused: true, mode: "devtools-conflict", pid };
         } catch {
-          /* fall through kill */
+          /* fall through */
         }
+      }
+      if (neverKill) {
+        throw new Error(
+          `#${claim.profile.browserIndex}: launch conflict + neverKill — không kill Chrome`,
+        );
       }
       await killChromeUsingProfileDir(userDataDir);
       await new Promise((r) => setTimeout(r, 1000));
@@ -2251,44 +2269,98 @@ async function runMapsReviewJob(claim: ClaimPayload, job: ProfileTaskJob) {
     throw new Error("MAPS_REVIEW requires a locked proxy (job.proxyId)");
   }
 
-  // LOGIN Chrome thường không proxy → MAPS bắt buộc proxy → phải launch Chrome mới với --proxy-server
-  // Chrome đóng (browserAlive=false / không trong pool): luôn tự launch — không cần mở tay trên Admin.
-  const wantProxy = true;
-  const live = browserPool.get(claim.profile.id);
-  const reuse =
-    Boolean(live?.browser.connected) &&
-    Boolean(live?.proxyEnabled) === wantProxy &&
-    live?.proxyId === claim.proxy.id;
-  if (!live?.browser.connected) {
-    console.log(
-      `[worker] MAPS_REVIEW #${claim.profile.browserIndex} ${claim.account.email} Chrome đang đóng — tự mở lại với proxy để đăng bình luận`,
-    );
-  } else if (live.browser.connected && !reuse) {
-    console.log(
-      `[worker] MAPS_REVIEW #${claim.profile.browserIndex} Chrome cũ proxy=${live.proxyEnabled ? live.proxyId : "OFF"} ≠ job proxy=${claim.proxy.id.slice(0, 8)}… — đóng rồi mở Chrome mới CÓ proxy`,
-    );
-  }
-  const ensured = reuse
-    ? { browser: live!.browser, reused: true as const, mode: "pool" as const, pid: live?.pid }
-    : await connectOrLaunchBrowser(claim, { useProxy: wantProxy });
-  const browser = ensured.browser;
+  /**
+   * QUAN TRỌNG — KHÔNG BAO GIỜ kill Chrome đang mở chỉ vì lệch proxy.
+   * Trước đây: LOGIN Chrome (không proxy) → MAPS bắt buộc proxy → kill → user thấy
+   * "vào Maps bị tắt". Giờ: Chrome còn → reconnect/reuse; chỉ launch mới khi
+   * thật sự không có cửa sổ.
+   */
   const profilePath = path.resolve(STORAGE_DIR, claim.profile.browserProfilePath);
-  let chromePid =
-    (ensured.pid && ensured.pid > 0 ? ensured.pid : undefined) ||
-    live?.pid ||
-    (await resolveChromePidByProfileDir(profilePath).catch(() => undefined));
+  const live = browserPool.get(claim.profile.id);
+  let browser: Browser;
+  let page: Awaited<ReturnType<Browser["newPage"]>>;
+  let chromePid: number | undefined;
+  let reused = false;
+  let mode = "launch";
+  let usingJobProxy = true;
 
-  await bindProxyAuthToBrowser(browser, claim.proxy);
+  if (live?.browser.connected) {
+    browser = live.browser;
+    page =
+      live.page && !live.page.isClosed()
+        ? live.page
+        : await setupPage(browser, claim, { useProxy: Boolean(live.proxyEnabled) });
+    chromePid = live.pid;
+    reused = true;
+    mode = "pool";
+    usingJobProxy = Boolean(live.proxyEnabled) && live.proxyId === claim.proxy.id;
+    console.log(
+      `[worker] MAPS_REVIEW #${claim.profile.browserIndex} REUSE Chrome đang mở (proxyMatch=${usingJobProxy}) — KHÔNG kill`,
+    );
+  } else if (profileDirInUse(profilePath)) {
+    // Chrome orphan còn sống → reconnect CDP, tuyệt đối không kill
+    const port = await readDevToolsPort(profilePath);
+    if (!port || !(await isDevToolsReachable(port))) {
+      throw new Error(
+        `MAPS_REVIEW #${claim.profile.browserIndex}: Chrome đang mở nhưng không reconnect được DevTools — mở tay / đóng Chrome rồi thử lại (worker KHÔNG tự kill)`,
+      );
+    }
+    browser = await puppeteer.connect({
+      browserURL: `http://127.0.0.1:${port}`,
+      defaultViewport: null,
+    });
+    const existingProxy = await readChromeProxyFromProfileDir(profilePath);
+    usingJobProxy = Boolean(
+      existingProxy &&
+        existingProxy.host === claim.proxy.host &&
+        existingProxy.port === claim.proxy.port,
+    );
+    if (usingJobProxy) {
+      await bindProxyAuthToBrowser(browser, claim.proxy);
+    }
+    page = await setupPage(browser, claim, { useProxy: usingJobProxy });
+    chromePid = await resolveChromePidByProfileDir(profilePath).catch(() => undefined);
+    reused = true;
+    mode = "devtools-nokill";
+    console.log(
+      `[worker] MAPS_REVIEW #${claim.profile.browserIndex} reconnect DevTools :${port} proxyMatch=${usingJobProxy} — KHÔNG kill`,
+    );
+  } else {
+    // Không có Chrome → launch mới CÓ proxy (lần đầu)
+    console.log(
+      `[worker] MAPS_REVIEW #${claim.profile.browserIndex} ${claim.account.email} Chrome đóng — mở mới với proxy`,
+    );
+    const ensured = await connectOrLaunchBrowser(claim, {
+      useProxy: true,
+      neverKill: true,
+    });
+    browser = ensured.browser;
+    chromePid = ensured.pid;
+    mode = ensured.mode;
+    await bindProxyAuthToBrowser(browser, claim.proxy);
+    page = await setupPage(browser, claim, { useProxy: true });
+    usingJobProxy = true;
+  }
 
-  const page =
-    reuse && live?.page && !live.page.isClosed()
-      ? live.page
-      : await setupPage(browser, claim, { useProxy: wantProxy });
-
-  // BẮT BUỘC: xác nhận exit IP qua proxy trước khi mở Maps (tránh spam IP máy)
-  const gate = await assertProxyBeforeMaps(page, claim.proxy);
+  // Proxy gate: chỉ BẮT BUỘC khi Chrome mới launch với job proxy.
+  // Reuse Chrome không đúng proxy → bỏ qua gate (cảnh báo), vẫn đăng được.
+  let gate: { exitIp: string; proxyLabel: string; directIp: string | null };
+  if (usingJobProxy) {
+    gate = await assertProxyBeforeMaps(page, claim.proxy);
+  } else {
+    console.warn(
+      `[worker] MAPS_REVIEW #${claim.profile.browserIndex} dùng Chrome hiện có (proxy ≠ job) — bỏ qua proxy-gate, ưu tiên không kill cửa sổ`,
+    );
+    gate = {
+      exitIp: "reuse-no-gate",
+      proxyLabel: claim.proxy
+        ? `${claim.proxy.host}:${claim.proxy.port} (not-applied)`
+        : "OFF",
+      directIp: null,
+    };
+  }
   console.log(
-    `[worker] MAPS_REVIEW browser đã gắn proxy=${gate.proxyLabel} (verified exitIp=${gate.exitIp}) mode=${ensured.mode} reused=${ensured.reused}`,
+    `[worker] MAPS_REVIEW browser ready proxy=${gate.proxyLabel} exitIp=${gate.exitIp} mode=${mode} reused=${reused}`,
   );
 
   if (!chromePid) {
@@ -2306,11 +2378,11 @@ async function runMapsReviewJob(claim: ClaimPayload, job: ProfileTaskJob) {
   /** Tab + cửa sổ OS. launch=1 lần; window=SwitchToThisWindow; tab=chỉ bringToFront. */
   const keepFocus = async (focusOpts?: { os?: "launch" | "window" | "tab" }) => {
     if (!page.isClosed()) await page.bringToFront().catch(() => undefined);
-    const mode = focusOpts?.os ?? "tab";
-    if (mode === "tab") return;
+    const modeFocus = focusOpts?.os ?? "tab";
+    if (modeFocus === "tab") return;
 
     const pid = await resolveMapsChromePid();
-    if (mode === "launch") {
+    if (modeFocus === "launch") {
       if (!mapsWindowRaised) {
         await activateBrowserOnScreen(browser, page, {
           preferredPid: pid,
@@ -2325,62 +2397,48 @@ async function runMapsReviewJob(claim: ClaimPayload, job: ProfileTaskJob) {
       return;
     }
 
-    // window — giữ foreground trong lúc đăng (SwitchToThisWindow, không maximize lại)
     const now = Date.now();
-    if (now - lastOsFocusAt < 1200) return;
+    if (now - lastOsFocusAt < 2500) return;
     lastOsFocusAt = now;
     await focusChromeWindowWindows(pid, { noMaximize: true, force: true }).catch(() => false);
   };
 
   await keepFocus({ os: "launch" });
 
-  if (!reuse) {
-    await browserPool.register({
-      profileId: claim.profile.id,
-      browserIndex: claim.profile.browserIndex,
-      browser,
-      page,
-      proxyId: claim.proxy.id,
-      cookiePath: claim.profile.cookiePath,
-      browserProfilePath: claim.profile.browserProfilePath,
-      openedAt: new Date(),
-      pid: chromePid || browser.process()?.pid,
-      accountEmail: claim.account.email,
-      markedReady: true,
-      proxyEnabled: wantProxy,
-      mapsReviewInProgress: true,
-      proxyAuth:
-        claim.proxy.username && claim.proxy.password
-          ? { username: claim.proxy.username, password: claim.proxy.password }
-          : null,
-    });
-  } else {
-    const liveSession = browserPool.get(claim.profile.id);
-    if (liveSession) {
-      liveSession.mapsReviewInProgress = true;
-      if (chromePid) liveSession.pid = chromePid;
-      if (claim.proxy.username && claim.proxy.password) {
-        liveSession.proxyAuth = {
-          username: claim.proxy.username,
-          password: claim.proxy.password,
-        };
-      }
-      await bindProxyAuthToBrowser(browser, claim.proxy);
-    }
-  }
+  await browserPool.register({
+    profileId: claim.profile.id,
+    browserIndex: claim.profile.browserIndex,
+    browser,
+    page,
+    proxyId: usingJobProxy ? claim.proxy.id : live?.proxyId || "none",
+    cookiePath: claim.profile.cookiePath,
+    browserProfilePath: claim.profile.browserProfilePath,
+    openedAt: new Date(),
+    pid: chromePid || browser.process()?.pid,
+    accountEmail: claim.account.email,
+    markedReady: true,
+    proxyEnabled: usingJobProxy,
+    mapsReviewInProgress: true,
+    proxyAuth:
+      usingJobProxy && claim.proxy.username && claim.proxy.password
+        ? { username: claim.proxy.username, password: claim.proxy.password }
+        : live?.proxyAuth ?? null,
+  });
 
   await enforceMaxTabs(browser, page);
   const browserVersion = await browser.version();
   console.log(
-    `[worker] MAPS_REVIEW #${claim.profile.browserIndex} ${claim.account.email} rating=${payload.rating} proxy=${gate.proxyLabel} exitIp=${gate.exitIp} directIp=${gate.directIp || "n/a"} auth=${proxyAuthDebug(claim.proxy)} mode=${ensured.mode} reused=${ensured.reused} pid=${chromePid || "?"}`,
+    `[worker] MAPS_REVIEW #${claim.profile.browserIndex} ${claim.account.email} rating=${payload.rating} proxy=${gate.proxyLabel} exitIp=${gate.exitIp} directIp=${gate.directIp || "n/a"} auth=${proxyAuthDebug(claim.proxy)} mode=${mode} reused=${reused} pid=${chromePid || "?"}`,
   );
 
-  // Không cần pulse focus: Chrome đã có flag chống throttle nền
-  // (--disable-background-timer-throttling…) nên chạy ổn cả khi không focus.
+  console.log(`[worker] MAPS_REVIEW #${claim.profile.browserIndex} → bắt đầu postMapsReview`);
   const out = await postMapsReview(page, payload, {
-    proxy: claim.proxy,
+    proxy: usingJobProxy ? claim.proxy : null,
     keepFocus,
   });
+  console.log(
+    `[worker] MAPS_REVIEW #${claim.profile.browserIndex} → postMapsReview xong ok=${out.ok}`,
+  );
   if (!out.ok) {
     throw new Error(
       "Đã bấm Đăng nhưng không bắt được xác nhận (màn cảm ơn / form đóng) — kiểm tra trên Chrome",
@@ -2406,9 +2464,9 @@ async function runMapsReviewJob(claim: ClaimPayload, job: ProfileTaskJob) {
       proxyId: claim.proxy.id,
       exitIp: gate.exitIp,
       directIp: gate.directIp,
-      proxyVerified: true,
-      browserMode: ensured.mode,
-      reusedBrowser: ensured.reused,
+      proxyVerified: usingJobProxy,
+      browserMode: mode,
+      reusedBrowser: reused,
       browserIndex: claim.profile.browserIndex,
       email: claim.account.email,
       browserAlive: true,
@@ -3145,6 +3203,15 @@ async function reclaimOrphanBrowsers() {
   let relaunchBudget = RECLAIM_RELAUNCH_MAX;
 
   for (const row of profiles) {
+    // Đang MAPS_REVIEW — tuyệt đối không reclaim/kill
+    const busyLive = browserPool.get(row.id);
+    if (busyLive?.mapsReviewInProgress || busyProfileIds.has(row.id)) {
+      console.log(
+        `[worker] reclaim skip #${row.browserIndex} — đang MAPS/busy`,
+      );
+      kept.push(row.id);
+      continue;
+    }
     const userDataDir = path.resolve(STORAGE_DIR, row.browserProfilePath);
     if (!existsSync(userDataDir) || !profileDirInUse(userDataDir)) continue;
 
