@@ -266,18 +266,35 @@ async function scoreReviewFrame(frame: Frame): Promise<number> {
       if (/ReviewsService\.LoadWriteWidget|writereview|WriteWidget/i.test(url)) {
         score += 50;
       }
-      if (document.querySelector('div[role="radiogroup"], [data-rating], [role="radio"]')) {
-        score += 30;
-      }
-      if (document.querySelector("textarea")) score += 20;
-      if (document.querySelector('button[jsname="IJM3w"]')) score += 10;
-      // Sao theo aria-label (UI Maps mới đôi khi không có data-rating)
-      const labeled = Array.from(
-        document.querySelectorAll("[aria-label], button, div, span"),
-      ).some((el) =>
-        /\b([1-5])\s*(sao|stars?)\b/i.test(el.getAttribute("aria-label") || ""),
+      const hasTextarea = !!document.querySelector(
+        'textarea, div[contenteditable="true"][role="textbox"], div[role="textbox"]',
       );
-      if (labeled) score += 25;
+      if (hasTextarea) score += 35;
+      if (document.querySelector('button[jsname="IJM3w"]')) score += 15;
+
+      // Sao form viết review — KHÔNG tính histogram place ("4 stars, 1 review")
+      const starEls = Array.from(
+        document.querySelectorAll(
+          '[data-rating], [role="radio"], div.s2xyy, [aria-label], button, div',
+        ),
+      );
+      let formStars = 0;
+      for (const el of starEls) {
+        const label = (el.getAttribute("aria-label") || "").trim();
+        // Place histogram: "4 stars, 1 review" / "4,0 sao · 1 bài đánh giá"
+        if (/,\s*\d+\s*(review|bài)/i.test(label)) continue;
+        if (/\b([1-5])\s*(sao|stars?)\b/i.test(label)) formStars += 1;
+        if (el.hasAttribute("data-rating") || el.getAttribute("role") === "radio") {
+          formStars += 1;
+        }
+      }
+      if (formStars >= 3) score += 30;
+      else if (formStars >= 1) score += 10;
+
+      // Place panel alone (sao tổng quan, không textarea) — không đủ để coi là form
+      if (!hasTextarea && !/WriteWidget|writereview/i.test(url) && score < 50) {
+        score = Math.min(score, 15);
+      }
       return score;
     });
   } catch {
@@ -657,9 +674,9 @@ async function selectStar(page: Page, value: number, _human: HumanCursor) {
   let lastDetail = "";
   let confidentHits = 0;
 
-  for (let attempt = 0; attempt < 12; attempt++) {
-    // Chỉ click trong frame được nhận diện là form review. Quét mọi frame Maps
-    // dễ nhầm các hàng icon khác thành 5 sao.
+  for (let attempt = 0; attempt < 8; attempt++) {
+    // Chỉ click trong frame form review thật (WriteWidget / có textarea).
+    // Place panel histogram ("4 stars, 1 review") bị loại bởi scoreReviewFrame.
     const scoredFrames = await Promise.all(
       page.frames().map(async (frame) => ({
         frame,
@@ -667,9 +684,18 @@ async function selectStar(page: Page, value: number, _human: HumanCursor) {
       })),
     );
     const frames = scoredFrames
-      .filter(({ score }) => score >= 20)
+      .filter(({ score }) => score >= 40)
       .sort((a, b) => b.score - a.score)
       .map(({ frame }) => frame);
+
+    if (!frames.length) {
+      // Chưa có form — chờ / thử mở lại nút viết đánh giá
+      if (attempt === 2 || attempt === 5) {
+        await clickReviewButton(page, _human).catch(() => undefined);
+      }
+      await sleep(500);
+      continue;
+    }
 
     for (const frame of frames) {
       await dismissCancelReviewPrompt(frame).catch(() => undefined);

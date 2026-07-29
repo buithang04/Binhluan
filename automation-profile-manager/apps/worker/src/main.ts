@@ -2367,7 +2367,7 @@ async function runMapsReviewJob(claim: ClaimPayload, job: ProfileTaskJob) {
 
 /** Timeout cứng theo task — 1 job treo (CDP đơ, dialog nền…) không được chặn cả hàng đợi. */
 const TASK_TIMEOUT_MS: Record<string, number> = {
-  MAPS_REVIEW: Math.max(120_000, Number(process.env.MAPS_REVIEW_TIMEOUT_MS || 10 * 60_000)),
+  MAPS_REVIEW: Math.max(180_000, Number(process.env.MAPS_REVIEW_TIMEOUT_MS || 15 * 60_000)),
   HEALTHCHECK: 4 * 60_000,
   BROWSER_CHECK: 4 * 60_000,
   LOGIN: 45 * 60_000,
@@ -2474,7 +2474,30 @@ async function processJob(job: ProfileTaskJob) {
     }
     const error = err instanceof Error ? err.message : String(err);
     const stacktrace = err instanceof Error ? err.stack : undefined;
-    const alive = Boolean(browserPool.get(job.profileId)?.browser.connected);
+    // MAPS_REVIEW lỗi/timeout: CHỈ ngắt CDP (tháo pool), KHÔNG kill Chrome.
+    // Kill Chrome ở đây chính là nguyên nhân "vừa vào Maps thì browser tắt" —
+    // user đang nhìn cửa sổ Maps thì timeout/fail → cửa sổ biến mất.
+    // Chrome còn mở → lần sau có thể reconnect (cùng proxy) hoặc kill có chủ đích
+    // khi bắt buộc đổi proxy lúc launch.
+    let alive = Boolean(browserPool.get(job.profileId)?.browser.connected);
+    if (job.taskCode === "MAPS_REVIEW") {
+      const wasConnected = alive;
+      await browserPool
+        .release(job.profileId, true, { kill: false })
+        .catch(() => undefined);
+      // Process Chrome thường vẫn sống sau disconnect CDP
+      alive = wasConnected;
+      try {
+        const dir = path.resolve(STORAGE_DIR, claim.profile.browserProfilePath);
+        const pid = await resolveChromePidByProfileDir(dir).catch(() => undefined);
+        if (pid) alive = true;
+      } catch {
+        /* ignore */
+      }
+      console.warn(
+        `[worker] MAPS_REVIEW fail — giữ Chrome mở (alive=${alive}): ${error.slice(0, 160)}`,
+      );
+    }
     await api("/internal/jobs/fail", {
       profileId: job.profileId,
       leaseToken: job.leaseToken,
@@ -2484,7 +2507,11 @@ async function processJob(job: ProfileTaskJob) {
       disableProfile: false,
       browserAlive: alive,
       workerId: WORKER_ID,
-    });
+    }).catch((e) =>
+      console.warn(
+        `[worker] báo fail thất bại (job có thể đã bị reset): ${e instanceof Error ? e.message : e}`,
+      ),
+    );
     throw err;
   } finally {
     if (job.taskCode === "LOGIN") markLoginBusy(false);
