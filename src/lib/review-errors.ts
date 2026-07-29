@@ -42,11 +42,11 @@ const ERROR_RULES: { test: RegExp; message: string }[] = [
   },
   {
     test: /browser không còn mở|bấm mở browser/i,
-    message: "Chrome đã đóng — bấm Đăng để hệ thống tự mở lại và đăng",
+    message: "Chrome đã đóng — hệ thống sẽ tự mở lại khi bấm Đăng",
   },
   {
     test: /chrome chưa mở|browseralive|chưa mở browser|chưa mở chrome/i,
-    message: "Chrome chưa mở — bấm Đăng để hệ thống tự mở và đăng",
+    message: "Chrome chưa mở — hệ thống sẽ tự mở khi bấm Đăng",
   },
   {
     test: /không tìm thấy nút viết|chỉnh sửa đánh giá/i,

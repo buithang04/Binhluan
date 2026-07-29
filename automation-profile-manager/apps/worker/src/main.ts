@@ -2198,13 +2198,18 @@ async function runMapsReviewJob(claim: ClaimPayload, job: ProfileTaskJob) {
   }
 
   // LOGIN Chrome thường không proxy → MAPS bắt buộc proxy → phải launch Chrome mới với --proxy-server
+  // Chrome đóng (browserAlive=false / không trong pool): luôn tự launch — không cần mở tay trên Admin.
   const wantProxy = true;
   const live = browserPool.get(claim.profile.id);
   const reuse =
     Boolean(live?.browser.connected) &&
     Boolean(live?.proxyEnabled) === wantProxy &&
     live?.proxyId === claim.proxy.id;
-  if (live?.browser.connected && !reuse) {
+  if (!live?.browser.connected) {
+    console.log(
+      `[worker] MAPS_REVIEW #${claim.profile.browserIndex} ${claim.account.email} Chrome đang đóng — tự mở lại với proxy để đăng bình luận`,
+    );
+  } else if (live.browser.connected && !reuse) {
     console.log(
       `[worker] MAPS_REVIEW #${claim.profile.browserIndex} Chrome cũ proxy=${live.proxyEnabled ? live.proxyId : "OFF"} ≠ job proxy=${claim.proxy.id.slice(0, 8)}… — đóng rồi mở Chrome mới CÓ proxy`,
     );
@@ -2236,15 +2241,35 @@ async function runMapsReviewJob(claim: ClaimPayload, job: ProfileTaskJob) {
     chromePid = await resolveChromePidByProfileDir(profilePath).catch(() => undefined);
   }
 
-  // Đưa Chrome lên màn hình MỘT LẦN trước khi vào Maps.
-  // Trong lúc đăng chỉ bringToFront tab (nhẹ) — không SetForegroundWindow/maximize
-  // lặp lại vì gây nhấp nháy + phím Alt giả làm mất focus ô bình luận.
   await activateBrowserOnScreen(browser, page, {
     preferredPid: chromePid,
     profilePath,
   });
-  const keepFocus = async () => {
+
+  let lastOsFocusAt = 0;
+  const resolveMapsChromePid = async () =>
+    chromePid ||
+    browserPool.get(claim.profile.id)?.pid ||
+    browser.process()?.pid ||
+    (await resolveChromePidByProfileDir(profilePath).catch(() => undefined));
+
+  /** Tab + cửa sổ OS. soft: foreground nhẹ (không Alt/maximize). full: maximize lần đầu. */
+  const keepFocus = async (focusOpts?: { os?: "soft" | "full" }) => {
     if (!page.isClosed()) await page.bringToFront().catch(() => undefined);
+    const mode = focusOpts?.os;
+    if (!mode) return;
+    const now = Date.now();
+    if (mode === "soft" && now - lastOsFocusAt < 3500) return;
+    lastOsFocusAt = now;
+    const pid = await resolveMapsChromePid();
+    if (mode === "full") {
+      await activateBrowserOnScreen(browser, page, {
+        preferredPid: pid,
+        profilePath,
+      });
+    } else {
+      await focusChromeWindowWindows(pid, { soft: true }).catch(() => undefined);
+    }
   };
 
   if (!reuse) {
@@ -2563,7 +2588,10 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction Silentl
 }
 
 /** Đưa cửa sổ Chrome đúng PID lên foreground (Windows). */
-async function focusChromeWindowWindows(pid?: number) {
+async function focusChromeWindowWindows(
+  pid?: number,
+  opts?: { soft?: boolean },
+) {
   if (!pid || !(Number(pid) > 0)) {
     // Không có PID → không focus lung tung (tránh nhảy sang Chrome account khác)
     console.warn("[worker] focus OS skipped — missing Chrome PID");
@@ -2573,9 +2601,11 @@ async function focusChromeWindowWindows(pid?: number) {
   const { promisify } = await import("util");
   const execFileAsync = promisify(execFile);
   const targetPid = Number(pid);
+  const soft = opts?.soft ? "$true" : "$false";
   // Alt keybd_event + AttachThreadInput giúp SetForegroundWindow không bị Windows chặn
-  // Chọn cửa sổ có title (bỏ qua chrome utility HWND trống)
+  // soft=true: chỉ restore + foreground (không Alt/maximize — tránh mất focus ô nhập)
   const ps = `
+$soft = ${soft}
 Add-Type @"
 using System;
 using System.Text;
@@ -2671,11 +2701,15 @@ if ($script:best -ne [IntPtr]::Zero) {
     [WinFocus]::ShowWindow($script:best, 9) | Out-Null   # SW_RESTORE
   }
   [WinFocus]::ShowWindow($script:best, 5) | Out-Null   # SW_SHOW
-  [WinFocus]::ShowWindow($script:best, 3) | Out-Null   # SW_MAXIMIZE
-  # ASFW_ANY + Alt trick — Windows hay chặn SetForegroundWindow từ process nền
+  if (-not $soft) {
+    [WinFocus]::ShowWindow($script:best, 3) | Out-Null   # SW_MAXIMIZE
+  }
+  # ASFW_ANY (+ Alt trick khi full) — Windows hay chặn SetForegroundWindow từ process nền
   [WinFocus]::AllowSetForegroundWindow(-1) | Out-Null
-  [WinFocus]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
-  [WinFocus]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
+  if (-not $soft) {
+    [WinFocus]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
+    [WinFocus]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
+  }
   $fore = [WinFocus]::GetForegroundWindow()
   $foreTid = [WinFocus]::GetWindowThreadProcessId($fore, [IntPtr]::Zero)
   $curTid = [WinFocus]::GetCurrentThreadId()

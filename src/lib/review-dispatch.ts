@@ -227,6 +227,12 @@ async function enqueueOneAssignment(
   );
 
   try {
+    // READY + Chrome đóng: worker MAPS tự launch — không cần open-browser trước.
+    if (profile && !profile.browserAlive) {
+      console.log(
+        `[review-dispatch] #${a.sortOrder + 1} ${profile.account.email} Chrome đóng — enqueue MAPS (worker sẽ tự mở)`,
+      );
+    }
     const res = await apmServerFetch<{ jobRunId: string }>(
       `/profiles/${a.apmProfileId}/run`,
       {

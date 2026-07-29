@@ -129,6 +129,11 @@ function stealthInPage() {
 
 async function injectIntoFrame(frame: Frame) {
   try {
+    // tsx/esbuild giữ tên hàm bằng helper __name. Puppeteer serialize callback
+    // sang browser context nhưng helper đó không tồn tại ở đó.
+    await frame.evaluate(
+      "globalThis.__name ||= function(target) { return target; };",
+    );
     await frame.evaluate(stealthInPage);
   } catch {
     /* cross-origin / detached */
@@ -139,10 +144,16 @@ export async function applyStealth(page: Page) {
   // Mọi document/iframe mới (CDP)
   const client = await page.createCDPSession();
   await client.send("Page.addScriptToEvaluateOnNewDocument", {
-    source: `(${stealthInPage.toString()})();`,
+    source: `
+      globalThis.__name ||= function(target) { return target; };
+      (${stealthInPage.toString()})();
+    `,
   });
 
   // Document hiện tại
+  await page
+    .evaluate("globalThis.__name ||= function(target) { return target; };")
+    .catch(() => undefined);
   await page.evaluate(stealthInPage).catch(() => undefined);
   for (const frame of page.frames()) {
     if (frame === page.mainFrame()) continue;
