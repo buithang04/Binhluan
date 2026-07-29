@@ -25,7 +25,8 @@ import {
 } from "./totp-login.js";
 
 // Load apps/worker/.env trước khi đọc token (tránh lệch INTERNAL_API_TOKEN với API)
-loadEnv({ path: path.resolve(__dirname, "../.env") });
+const FOCUS_CHROME_PS1 = path.resolve(__dirname, "../scripts/focus-chrome-window.ps1");
+const maximizedBrowsers = new WeakSet<Browser>();
 
 const API_BASE = process.env.API_BASE_URL || "http://127.0.0.1:4000/api";
 const INTERNAL_TOKEN =
@@ -2241,11 +2242,7 @@ async function runMapsReviewJob(claim: ClaimPayload, job: ProfileTaskJob) {
     chromePid = await resolveChromePidByProfileDir(profilePath).catch(() => undefined);
   }
 
-  await activateBrowserOnScreen(browser, page, {
-    preferredPid: chromePid,
-    profilePath,
-  });
-
+  let mapsWindowRaised = false;
   let lastOsFocusAt = 0;
   const resolveMapsChromePid = async () =>
     chromePid ||
@@ -2253,24 +2250,36 @@ async function runMapsReviewJob(claim: ClaimPayload, job: ProfileTaskJob) {
     browser.process()?.pid ||
     (await resolveChromePidByProfileDir(profilePath).catch(() => undefined));
 
-  /** Tab + cửa sổ OS. soft: foreground nhẹ (không Alt/maximize). full: maximize lần đầu. */
-  const keepFocus = async (focusOpts?: { os?: "soft" | "full" }) => {
+  /** Tab + cửa sổ OS. launch=1 lần; window=SwitchToThisWindow; tab=chỉ bringToFront. */
+  const keepFocus = async (focusOpts?: { os?: "launch" | "window" | "tab" }) => {
     if (!page.isClosed()) await page.bringToFront().catch(() => undefined);
-    const mode = focusOpts?.os;
-    if (!mode) return;
-    const now = Date.now();
-    if (mode === "soft" && now - lastOsFocusAt < 3500) return;
-    lastOsFocusAt = now;
+    const mode = focusOpts?.os ?? "tab";
+    if (mode === "tab") return;
+
     const pid = await resolveMapsChromePid();
-    if (mode === "full") {
-      await activateBrowserOnScreen(browser, page, {
-        preferredPid: pid,
-        profilePath,
-      });
-    } else {
-      await focusChromeWindowWindows(pid, { soft: true }).catch(() => undefined);
+    if (mode === "launch") {
+      if (!mapsWindowRaised) {
+        await activateBrowserOnScreen(browser, page, {
+          preferredPid: pid,
+          profilePath,
+          maximize: true,
+        });
+        mapsWindowRaised = true;
+        lastOsFocusAt = Date.now();
+      } else {
+        await focusChromeWindowWindows(pid, { force: true }).catch(() => false);
+      }
+      return;
     }
+
+    // window — giữ foreground trong lúc đăng (SwitchToThisWindow, không maximize lại)
+    const now = Date.now();
+    if (now - lastOsFocusAt < 1200) return;
+    lastOsFocusAt = now;
+    await focusChromeWindowWindows(pid, { noMaximize: true, force: true }).catch(() => false);
   };
+
+  await keepFocus({ os: "launch" });
 
   if (!reuse) {
     await browserPool.register({
@@ -2587,170 +2596,56 @@ Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction Silentl
   }
 }
 
-/** Đưa cửa sổ Chrome đúng PID lên foreground (Windows). */
+/** Đưa cửa sổ Chrome đúng PID lên foreground (Windows) — script .ps1 riêng, ổn định hơn inline. */
 async function focusChromeWindowWindows(
   pid?: number,
-  opts?: { soft?: boolean },
+  opts?: { noMaximize?: boolean; noAlt?: boolean; force?: boolean },
 ) {
   if (!pid || !(Number(pid) > 0)) {
-    // Không có PID → không focus lung tung (tránh nhảy sang Chrome account khác)
     console.warn("[worker] focus OS skipped — missing Chrome PID");
-    return;
+    return false;
+  }
+  if (!existsSync(FOCUS_CHROME_PS1)) {
+    console.warn(`[worker] focus OS skipped — missing script ${FOCUS_CHROME_PS1}`);
+    return false;
   }
   const { execFile } = await import("child_process");
   const { promisify } = await import("util");
   const execFileAsync = promisify(execFile);
-  const targetPid = Number(pid);
-  const soft = opts?.soft ? "$true" : "$false";
-  // Alt keybd_event + AttachThreadInput giúp SetForegroundWindow không bị Windows chặn
-  // soft=true: chỉ restore + foreground (không Alt/maximize — tránh mất focus ô nhập)
-  const ps = `
-$soft = ${soft}
-Add-Type @"
-using System;
-using System.Text;
-using System.Runtime.InteropServices;
-public class WinFocus {
-  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
-  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
-  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
-  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out int lpdwProcessId);
-  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
-  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr processId);
-  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
-  [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
-  [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hWnd);
-  [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
-  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
-  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
-  [DllImport("user32.dll")] public static extern bool AllowSetForegroundWindow(int dwProcessId);
-  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
-  public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
-  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
-}
-"@
-$rootPid = ${targetPid}
-# Một lần lấy chrome.exe — tránh Get-CimInstance đệ quy (rất chậm)
-$chrome = @(Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction SilentlyContinue)
-$parentOf = @{}
-foreach ($p in $chrome) { $parentOf[[int]$p.ProcessId] = [int]$p.ParentProcessId }
-function Is-UnderRoot([int]$id) {
-  $guard = 0
-  while ($id -and $guard -lt 32) {
-    if ($id -eq $rootPid) { return $true }
-    if (-not $parentOf.ContainsKey($id)) {
-      $proc = Get-Process -Id $id -ErrorAction SilentlyContinue
-      if (-not $proc) { return $false }
-      $cim = Get-CimInstance Win32_Process -Filter "ProcessId = $id" -ErrorAction SilentlyContinue
-      if (-not $cim) { return $false }
-      $parentOf[$id] = [int]$cim.ParentProcessId
-    }
-    $id = [int]$parentOf[$id]
-    $guard++
-  }
-  return $false
-}
-$allow = @($rootPid)
-foreach ($p in $chrome) {
-  $cid = [int]$p.ProcessId
-  if (Is-UnderRoot $cid) { $allow += $cid }
-}
-$allow = @($allow | Select-Object -Unique)
-# Đã foreground rồi → thoát sớm, không bắn Alt/SetForegroundWindow (tránh mất focus ô nhập)
-$foreNow = [WinFocus]::GetForegroundWindow()
-$forePid = 0
-[void][WinFocus]::GetWindowThreadProcessId($foreNow, [ref]$forePid)
-if ($allow -contains $forePid) {
-  Write-Output "already-foreground pid-tree=$rootPid"
-  exit 0
-}
-$script:best = [IntPtr]::Zero
-$script:bestArea = -1
-$script:bestVisible = $false
-$callback = [WinFocus+EnumWindowsProc]{
-  param([IntPtr]$hwnd, [IntPtr]$lParam)
-  $procId = 0
-  [void][WinFocus]::GetWindowThreadProcessId($hwnd, [ref]$procId)
-  if ($allow -notcontains $procId) { return $true }
-  $len = [WinFocus]::GetWindowTextLength($hwnd)
-  # Cần có title (cửa sổ Chrome chính), kể cả đang bị ẩn
-  if ($len -le 0) { return $true }
-  $rect = New-Object WinFocus+RECT
-  if (-not [WinFocus]::GetWindowRect($hwnd, [ref]$rect)) { return $true }
-  $area = [Math]::Abs(($rect.Right - $rect.Left) * ($rect.Bottom - $rect.Top))
-  if ($area -lt 20000) { return $true }
-  $vis = [WinFocus]::IsWindowVisible($hwnd)
-  # Ưu tiên cửa sổ đang visible; nếu chưa có thì nhận cả cửa sổ ẩn
-  $better = $false
-  if ($script:best -eq [IntPtr]::Zero) { $better = $true }
-  elseif ($vis -and -not $script:bestVisible) { $better = $true }
-  elseif ($vis -eq $script:bestVisible -and $area -gt $script:bestArea) { $better = $true }
-  if ($better) {
-    $script:bestArea = $area
-    $script:best = $hwnd
-    $script:bestVisible = $vis
-  }
-  return $true
-}
-[void][WinFocus]::EnumWindows($callback, [IntPtr]::Zero)
-if ($script:best -ne [IntPtr]::Zero) {
-  # Bắt buộc hiện lại nếu đang ẩn / minimize
-  if ([WinFocus]::IsIconic($script:best)) {
-    [WinFocus]::ShowWindow($script:best, 9) | Out-Null   # SW_RESTORE
-  }
-  [WinFocus]::ShowWindow($script:best, 5) | Out-Null   # SW_SHOW
-  if (-not $soft) {
-    [WinFocus]::ShowWindow($script:best, 3) | Out-Null   # SW_MAXIMIZE
-  }
-  # ASFW_ANY (+ Alt trick khi full) — Windows hay chặn SetForegroundWindow từ process nền
-  [WinFocus]::AllowSetForegroundWindow(-1) | Out-Null
-  if (-not $soft) {
-    [WinFocus]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
-    [WinFocus]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
-  }
-  $fore = [WinFocus]::GetForegroundWindow()
-  $foreTid = [WinFocus]::GetWindowThreadProcessId($fore, [IntPtr]::Zero)
-  $curTid = [WinFocus]::GetCurrentThreadId()
-  $targetTid = [WinFocus]::GetWindowThreadProcessId($script:best, [IntPtr]::Zero)
-  if ($foreTid -ne 0 -and $foreTid -ne $curTid) {
-    [WinFocus]::AttachThreadInput($curTid, $foreTid, $true) | Out-Null
-  }
-  if ($targetTid -ne 0 -and $targetTid -ne $curTid) {
-    [WinFocus]::AttachThreadInput($curTid, $targetTid, $true) | Out-Null
-  }
-  [WinFocus]::BringWindowToTop($script:best) | Out-Null
-  [WinFocus]::SetForegroundWindow($script:best) | Out-Null
-  if ($targetTid -ne 0 -and $targetTid -ne $curTid) {
-    [WinFocus]::AttachThreadInput($curTid, $targetTid, $false) | Out-Null
-  }
-  if ($foreTid -ne 0 -and $foreTid -ne $curTid) {
-    [WinFocus]::AttachThreadInput($curTid, $foreTid, $false) | Out-Null
-  }
-  $nowVis = [WinFocus]::IsWindowVisible($script:best)
-  Write-Output "focused pid-tree=$rootPid area=$($script:bestArea) wasVisible=$($script:bestVisible) nowVisible=$nowVis"
-} else {
-  Write-Output "no-window pid-tree=$rootPid"
-}
-`;
-  const result = await execFileAsync(
-    "powershell.exe",
-    ["-NoProfile", "-NonInteractive", "-Command", ps],
-    { timeout: 8_000, windowsHide: true, encoding: "utf8" },
-  ).catch((e) => {
-    console.warn("[worker] focus OS powershell failed", e instanceof Error ? e.message : e);
-    return { stdout: "" };
+  const args = [
+    "-NoProfile",
+    "-NonInteractive",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    FOCUS_CHROME_PS1,
+    "-RootPid",
+    String(Number(pid)),
+  ];
+  if (opts?.noMaximize) args.push("-NoMaximize");
+  if (opts?.noAlt) args.push("-NoAlt");
+  if (opts?.force) args.push("-Force");
+
+  const result = await execFileAsync("powershell.exe", args, {
+    timeout: 20_000,
+    windowsHide: true,
+    encoding: "utf8",
+  }).catch((e: NodeJS.ErrnoException & { stdout?: string; stderr?: string }) => {
+    const detail = [e.stderr, e.stdout, e.message].filter(Boolean).join(" ").slice(0, 240);
+    console.warn(`[worker] focus OS failed pid=${pid}: ${detail}`);
+    return null;
   });
+  if (!result) return false;
   const out = String(result.stdout || "").trim();
-  if (out) console.log(`[worker] focus OS: ${out}`);
+  if (out) console.log(`[worker] focus OS: ${out.split(/\r?\n/).pop()}`);
+  return /ok=True|already-foreground|focused pid-tree=/i.test(out);
 }
 
 /** Đưa Chrome lên màn hình ngay (tab + cửa sổ OS). */
 async function activateBrowserOnScreen(
   browser: Browser,
   page?: Awaited<ReturnType<Browser["newPage"]>> | null,
-  opts?: { preferredPid?: number; profilePath?: string },
+  opts?: { preferredPid?: number; profilePath?: string; maximize?: boolean },
 ) {
   const target =
     page && !page.isClosed()
@@ -2758,6 +2653,7 @@ async function activateBrowserOnScreen(
       : (await browser.pages()).find((p) => !p.isClosed()) || null;
   if (target) {
     await target.bringToFront().catch(() => undefined);
+    const wantMaximize = opts?.maximize !== false && !maximizedBrowsers.has(browser);
     try {
       const client = await target.createCDPSession();
       const { windowId } = (await client.send("Browser.getWindowForTarget")) as {
@@ -2766,18 +2662,22 @@ async function activateBrowserOnScreen(
       const { bounds } = (await client.send("Browser.getWindowBounds", {
         windowId,
       })) as { bounds: { windowState?: string } };
-      // Chỉ đổi state khi cần — toggle normal→maximized mỗi lần gây nhấp nháy
       if (bounds.windowState === "minimized") {
         await client.send("Browser.setWindowBounds", {
           windowId,
           bounds: { windowState: "normal" },
         });
       }
-      if (bounds.windowState !== "maximized" && bounds.windowState !== "fullscreen") {
+      if (
+        wantMaximize &&
+        bounds.windowState !== "maximized" &&
+        bounds.windowState !== "fullscreen"
+      ) {
         await client.send("Browser.setWindowBounds", {
           windowId,
           bounds: { windowState: "maximized" },
         });
+        maximizedBrowsers.add(browser);
       }
       await client.detach().catch(() => undefined);
     } catch {
@@ -2791,7 +2691,7 @@ async function activateBrowserOnScreen(
     if (!pid) {
       pid = await resolveChromePidByProfileDir(opts?.profilePath);
     }
-    await focusChromeWindowWindows(pid).catch(() => undefined);
+    await focusChromeWindowWindows(pid, { force: true }).catch(() => false);
   }
 }
 

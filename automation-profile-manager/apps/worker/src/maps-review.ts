@@ -1600,8 +1600,8 @@ export async function postMapsReview(
   payload: MapsReviewPayload,
   opts?: {
     proxy?: ProxyAuth | null;
-    /** Đưa Chrome lên foreground — os=full lúc mở Maps; os=soft giữa các bước. */
-    keepFocus?: (opts?: { os?: "soft" | "full" }) => Promise<void>;
+    /** Đưa Chrome lên foreground — launch (1 lần), window (OS), tab (chỉ tab). */
+    keepFocus?: (opts?: { os?: "launch" | "window" | "tab" }) => Promise<void>;
   },
 ): Promise<{
   ok: boolean;
@@ -1611,7 +1611,7 @@ export async function postMapsReview(
   alreadyReviewed?: boolean;
 }> {
   await attachProxyAuthToPage(page, opts?.proxy);
-  const keepFocus = async (focusOpts?: { os?: "soft" | "full" }) => {
+  const keepFocus = async (focusOpts?: { os?: "launch" | "window" | "tab" }) => {
     if (!opts?.keepFocus) return;
     await opts.keepFocus(focusOpts).catch(() => undefined);
   };
@@ -1619,13 +1619,13 @@ export async function postMapsReview(
   const human = new HumanCursor(page);
   await human.init();
 
-  await keepFocus({ os: "full" });
+  await keepFocus({ os: "launch" });
   await page.goto(payload.placeUrl, {
     waitUntil: "domcontentloaded",
     timeout: 60_000,
   });
   await sleep(rand(2200, 3800));
-  await keepFocus({ os: "full" });
+  await keepFocus({ os: "window" });
   await human.warmUp();
 
   if (await detectExistingReview(page)) {
@@ -1644,7 +1644,7 @@ export async function postMapsReview(
     };
   }
 
-  await keepFocus({ os: "soft" });
+  await keepFocus({ os: "window" });
   // Ưu tiên bấm sao trên panel place (thường mở form + đã chọn sao)
   const ratedOnPlace = await tryRateOnPlacePanel(page, payload.rating, human);
   await sleep(rand(600, 1100));
@@ -1661,7 +1661,7 @@ export async function postMapsReview(
     await sleep(rand(1200, 2000));
     frame = await waitReviewFrame(page);
   }
-  await keepFocus({ os: "soft" });
+  await keepFocus({ os: "window" });
 
   // Chọn / xác nhận sao trên mọi frame (iframe widget + dialog)
   try {
@@ -1678,34 +1678,35 @@ export async function postMapsReview(
       await clickReviewButton(page, human).catch(() => undefined);
       await sleep(1500);
       frame = await waitReviewFrame(page, 20_000);
-      await keepFocus({ os: "soft" });
+      await keepFocus({ os: "window" });
       await selectStar(page, payload.rating, human);
     }
   }
   // Form có thể đổi frame sau khi chọn sao
   frame = await waitReviewFrame(page, 12_000).catch(() => frame);
   await sleep(rand(400, 900));
-  await keepFocus({ os: "soft" });
+  await keepFocus({ os: "window" });
 
   if (!frame) {
     throw new Error("Không tìm thấy form viết đánh giá sau khi chọn sao");
   }
 
   try {
+    await keepFocus({ os: "tab" });
     await enterReview(frame, payload.reviewText, human);
   } catch (e) {
     console.warn(
       `[maps-review] enterReview lần 1 lỗi: ${e instanceof Error ? e.message : e} — retry`,
     );
     frame = await waitReviewFrame(page, 15_000);
-    await keepFocus({ os: "soft" });
+    await keepFocus({ os: "window" });
     await selectStar(page, payload.rating, human).catch(() => undefined);
     await enterReview(frame, payload.reviewText, human);
   }
   const imagePaths =
     payload.imagePaths?.filter(Boolean) ??
     (payload.imagePath ? [payload.imagePath] : []);
-  await keepFocus({ os: "soft" });
+  await keepFocus({ os: "window" });
   const uploaded = imagePaths.length
     ? await addImages(frame, page, imagePaths)
     : 0;
@@ -1717,9 +1718,9 @@ export async function postMapsReview(
     console.log(`[maps-review] uploaded ${uploaded} image(s)`);
   }
   await sleep(rand(800, 1500));
-  await keepFocus({ os: "soft" });
+  await keepFocus({ os: "window" });
   await submitReview(frame, payload.rating, human);
-  await keepFocus({ os: "soft" });
+  await keepFocus({ os: "window" });
   const thanks = await finishThankYou(page);
   let reviewLink = thanks.reviewLink;
   let ok = thanks.ok;
@@ -1741,7 +1742,7 @@ export async function postMapsReview(
 
   // Thiếu link → scrape lại từ trang place (đánh giá của bạn / card nội dung)
   if (ok && !reviewLink) {
-    await keepFocus({ os: "soft" });
+    await keepFocus({ os: "window" });
     reviewLink = await resolveReviewLinkFromPlace(
       page,
       payload.placeUrl,
