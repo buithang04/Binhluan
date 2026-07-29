@@ -95,6 +95,40 @@ function accountsSnapshot(list: Account[]): string {
     .join(";");
 }
 
+function accountIsReady(account: Account): boolean {
+  return account.status === "READY" || account.profile?.status === "READY";
+}
+
+/** Nhãn trạng thái — ưu tiên profile QUEUED/RUNNING khi đang mở Chrome. */
+function accountStatusLabel(account: Account): string {
+  if (accountIsReady(account)) return "Sẵn sàng";
+  const ps = (account.profile?.status || "").toUpperCase();
+  if (ps === "RUNNING") return "Đang chạy";
+  if (ps === "QUEUED") return "Trong hàng đợi";
+  return formatLoginStatus(account.status || "UNREADY", account.loginIssue);
+}
+
+/** Browser đang mở hoặc worker đang xử lý LOGIN. */
+function profileBrowserActive(account: Account): boolean {
+  if (!account.profile) return false;
+  if (account.profile.browserAlive) return true;
+  const ps = (account.profile.status || "").toUpperCase();
+  return ps === "QUEUED" || ps === "RUNNING";
+}
+
+function optimisticOpeningPatch(account: Account): Account {
+  if (!account.profile) return account;
+  return {
+    ...account,
+    loginIssue: null,
+    profile: {
+      ...account.profile,
+      status: "QUEUED",
+      browserAlive: true,
+    },
+  };
+}
+
 const emptyForm = {
   email: "",
   password: "",
@@ -521,6 +555,11 @@ export default function AdminAccountsPage() {
     setBusyId(account.id);
     setError("");
     setMessage("");
+    if (account.profile) {
+      setRows((prev) =>
+        prev.map((a) => (a.id === account.id ? optimisticOpeningPatch(a) : a)),
+      );
+    }
     try {
       if (!account.profile) {
         await apmFetch("/profiles/auto-assign", token, {
@@ -528,7 +567,7 @@ export default function AdminAccountsPage() {
           body: JSON.stringify({ accountId: account.id, openLogin: true }),
         });
         setMessage("Đã tạo hồ sơ — đang mở Chrome đăng nhập…");
-        await load();
+        await load({ silent: true });
         return;
       }
 
@@ -536,7 +575,6 @@ export default function AdminAccountsPage() {
       const fullyReady =
         alive &&
         (account.status === "READY" || account.profile.status === "READY");
-      // Đã READY + đang mở → focus. Còn lại (kể cả đang verify) → LOGIN để tự điền.
       const res = await apmFetch<OpenResult>(
         fullyReady
           ? `/profiles/${account.profile.id}/focus-browser`
@@ -545,16 +583,16 @@ export default function AdminAccountsPage() {
         { method: "POST", body: "{}" },
       );
 
+      await load({ silent: true });
+
       const idx = res.browserIndex ?? account.profile.browserIndex ?? "?";
       if (res.action === "focus") {
         setMessage(`Chrome #${idx} — đã đưa lên màn hình.`);
-        await load({ silent: true });
         return;
       }
 
       if (res.action === "pending") {
         setMessage(`Chrome #${idx} đang đăng nhập — đã gửi lệnh hiện cửa sổ.`);
-        await load({ silent: true });
         return;
       }
 
@@ -563,11 +601,11 @@ export default function AdminAccountsPage() {
           ? `Chrome #${idx} — đang tự điền đăng nhập / xác minh…`
           : `Đang mở Chrome #${idx} đăng nhập…`,
       );
-      setBusyId(null);
+
       const targetId = account.id;
       const deadline = Date.now() + 90_000;
       while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 2000));
+        await new Promise((r) => setTimeout(r, 800));
         if (!token) break;
         try {
           const list = await apmFetch<Account[]>("/accounts", token);
@@ -575,9 +613,16 @@ export default function AdminAccountsPage() {
             accountsSnapshot(prev) === accountsSnapshot(list) ? prev : list,
           );
           const fresh = list.find((a) => a.id === targetId);
-          if (fresh?.status === "READY" || fresh?.profile?.status === "READY") {
+          if (!fresh) break;
+          if (accountIsReady(fresh)) {
             setMessage(`Chrome #${idx} — đăng nhập thành công (READY).`);
             break;
+          }
+          if (
+            fresh.profile?.browserAlive &&
+            (fresh.profile.status === "RUNNING" || fresh.profile.status === "QUEUED")
+          ) {
+            /* Chrome đã mở — tiếp tục poll tới READY */
           }
         } catch {
           /* poll tiếp */
@@ -585,7 +630,7 @@ export default function AdminAccountsPage() {
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-      await load();
+      await load({ silent: true });
     } finally {
       setBusyId(null);
     }
@@ -1231,14 +1276,12 @@ export default function AdminAccountsPage() {
               </thead>
               <tbody>
                 {pageRows.map((r, i) => {
-                  const alive = !!r.profile?.browserAlive;
-                  const ready = r.status === "READY" || r.profile?.status === "READY";
-                  const showFocus = alive && ready;
+                  const alive = profileBrowserActive(r);
+                  const ready = accountIsReady(r);
+                  const showFocus = !!r.profile?.browserAlive && ready;
                   const busy = busyId === r.id || bulkBusy;
                   const checked = selectedIds.has(r.id);
-                  const statusLabel = ready
-                    ? "Sẵn sàng"
-                    : formatLoginStatus(r.status || "UNREADY", r.loginIssue);
+                  const statusLabel = accountStatusLabel(r);
                   return (
                     <tr key={r.id} className={checked ? "row-selected" : undefined}>
                       <td>
