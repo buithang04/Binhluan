@@ -9,6 +9,7 @@ import {
   parseReviewSpinByStar,
   resolveReviewTextForStar,
   availableReviewProfileWhere,
+  prioritizeProfilesWith2Fa,
 } from "@/lib/review-content";
 import { pickRandomMediaAssets, enrichPlanAssignments } from "@/lib/review-media";
 import { planReviewScheduleDates } from "@/lib/review-schedule";
@@ -161,16 +162,12 @@ export async function POST(req: Request, ctx: Ctx) {
   }
 
   const now = new Date();
-  const pool = await prisma.profile.findMany({
-    where: availableReviewProfileWhere(now),
-    include: { account: { select: { email: true } } },
-  });
-
-  // Random mail — không lấy theo browserIndex cố định
-  for (let i = pool.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [pool[i], pool[j]] = [pool[j]!, pool[i]!];
-  }
+  const pool = prioritizeProfilesWith2Fa(
+    await prisma.profile.findMany({
+      where: availableReviewProfileWhere(now),
+      include: { account: { select: { email: true, totpSecretEnc: true } } },
+    }),
+  );
   const usedEmails = new Set(
     completedKeep.map((a) => a.profileEmail).filter(Boolean) as string[],
   );

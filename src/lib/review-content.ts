@@ -120,6 +120,27 @@ export function availableReviewProfileWhere(now = new Date()) {
   };
 }
 
+function shuffleInPlace<T>(arr: T[]): T[] {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j]!, arr[i]!];
+  }
+  return arr;
+}
+
+/** Ưu tiên mail có 2FA (TOTP) trước; random trong từng nhóm. */
+export function prioritizeProfilesWith2Fa<
+  T extends { account: { totpSecretEnc?: unknown | null } },
+>(profiles: T[]): T[] {
+  const with2fa: T[] = [];
+  const without2fa: T[] = [];
+  for (const p of profiles) {
+    if (p.account.totpSecretEnc) with2fa.push(p);
+    else without2fa.push(p);
+  }
+  return [...shuffleInPlace(with2fa), ...shuffleInPlace(without2fa)];
+}
+
 /** Resolve 1 bình luận hoàn chỉnh từ spin template theo sao. */
 export function resolveReviewTextForStar(
   stars: number,

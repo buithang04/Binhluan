@@ -48,6 +48,12 @@ export class ProfilesController {
     return this.profiles.stopJobs(body);
   }
 
+  @Post("verify-all-sessions")
+  @Roles("ADMIN")
+  verifyAllSessions() {
+    return this.profiles.verifyAllSessions();
+  }
+
   @Get(":id")
   @Roles("ADMIN")
   get(@Param("id") id: string) {

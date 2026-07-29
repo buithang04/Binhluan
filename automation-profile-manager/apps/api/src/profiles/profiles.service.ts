@@ -483,6 +483,64 @@ export class ProfilesService {
     return { ok: true };
   }
 
+  /** Xếp hàng LOGIN cho mọi hồ sơ — worker kiểm tra session Google tuần tự (1 Chrome/lần). */
+  async verifyAllSessions() {
+    const profiles = await this.prisma.profile.findMany({
+      where: { status: { not: "DISABLED" } },
+      include: { account: { select: { email: true } } },
+      orderBy: { browserIndex: "asc" },
+    });
+
+    const items: Array<{
+      profileId: string;
+      browserIndex: number;
+      email: string;
+      ok: boolean;
+      jobRunId?: string;
+      skipReason?: string;
+    }> = [];
+
+    for (const p of profiles) {
+      if (p.status === "RUNNING" || p.status === "QUEUED") {
+        items.push({
+          profileId: p.id,
+          browserIndex: p.browserIndex,
+          email: p.account.email,
+          ok: false,
+          skipReason: "busy",
+        });
+        continue;
+      }
+      try {
+        const job = await this.enqueue(p.id, { taskCode: "LOGIN" });
+        items.push({
+          profileId: p.id,
+          browserIndex: p.browserIndex,
+          email: p.account.email,
+          ok: true,
+          jobRunId: job.jobRunId,
+        });
+      } catch (e) {
+        items.push({
+          profileId: p.id,
+          browserIndex: p.browserIndex,
+          email: p.account.email,
+          ok: false,
+          skipReason: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+
+    const enqueued = items.filter((i) => i.ok).length;
+    return {
+      message: `Đã xếp hàng kiểm tra ${enqueued}/${profiles.length} hồ sơ — worker mở Chrome tuần tự để xác minh đăng nhập`,
+      total: profiles.length,
+      enqueued,
+      skipped: profiles.length - enqueued,
+      items,
+    };
+  }
+
   /**
    * Dừng job QUEUED/RUNNING + xóa queue chờ.
    * Clear loginIssue RECAPTCHA/CHALLENGE để banner UI tắt.

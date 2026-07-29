@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import { MAX_PROJECT_MEDIA } from "@/lib/limits";
 import { planReviewStars } from "@/lib/review-planner";
 import {
-  addCalendarDays,
   vnMinCampaignStartDate,
 } from "@/lib/review-schedule";
 import { DESCRIPTION_MAX_LENGTH } from "@/lib/validations";
@@ -125,9 +124,7 @@ export function ProjectForm({
   const [endAt, setEndAt] = useState(toDateInput(initial?.endAt));
   const minCampaignDate = vnMinCampaignStartDate();
   const minEndDate =
-    startAt && startAt >= minCampaignDate
-      ? addCalendarDays(startAt, 1)
-      : addCalendarDays(minCampaignDate, 1);
+    startAt && startAt >= minCampaignDate ? startAt : minCampaignDate;
   const [products, setProducts] = useState<ProductRow[]>(
     initial?.products?.length
       ? initial.products
@@ -290,7 +287,7 @@ export function ProjectForm({
       return `Ngày bắt đầu phải từ ${minCampaignDate} trở đi`;
     }
     if (!endAt) return "Vui lòng chọn ngày kết thúc";
-    if (endAt <= startAt) return "Ngày kết thúc phải sau ngày bắt đầu";
+    if (endAt < startAt) return "Ngày kết thúc không được trước ngày bắt đầu";
     return null;
   }
 
@@ -650,14 +647,14 @@ export function ProjectForm({
             onChange={(e) => {
               const next = e.target.value;
               setStartAt(next);
-              if (next && endAt && endAt <= next) {
-                setEndAt(addCalendarDays(next, 1));
+              if (next && endAt && endAt < next) {
+                setEndAt(next);
               }
             }}
             required={showPackage}
           />
           <p className="mt-1 text-xs text-[var(--muted)]">
-            Chỉ chọn từ ngày mai ({minCampaignDate}) — không chọn hôm nay hoặc ngày đã qua
+            Chọn từ hôm nay ({minCampaignDate}) trở đi
           </p>
         </Field>
         <Field label="Kết thúc *" htmlFor="endAt">

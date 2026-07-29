@@ -755,6 +755,37 @@ export default function AdminAccountsPage() {
     setBulkBusy(false);
   }
 
+  async function verifyAllProfiles() {
+    if (!token) return;
+    const ok = window.confirm(
+      "Kiểm tra tất cả hồ sơ?\nWorker sẽ mở Chrome lần lượt (1 hồ sơ/lần) để xác minh đăng nhập Google.\nDừng lại nếu gặp reCAPTCHA / xác minh tay.",
+    );
+    if (!ok) return;
+    setBulkBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const res = await apmFetch<{
+        message?: string;
+        total?: number;
+        enqueued?: number;
+        skipped?: number;
+      }>("/profiles/verify-all-sessions", token, {
+        method: "POST",
+        body: "{}",
+      });
+      setMessage(
+        res.message ||
+          `Đã xếp hàng kiểm tra ${res.enqueued ?? 0}/${res.total ?? 0} hồ sơ.`,
+      );
+      await load({ silent: true });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
   async function stopRunningJobs(scope: "all" | "selected") {
     if (!token) return;
     const profileIds =
@@ -820,6 +851,15 @@ export default function AdminAccountsPage() {
           <h1 className="page-title">Tài khoản Google</h1>
         </div>
         <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            className="btn btn-secondary"
+            disabled={bulkBusy}
+            title="Mở Chrome lần lượt để kiểm tra session Google còn sống"
+            onClick={() => void verifyAllProfiles()}
+          >
+            Kiểm tra hồ sơ
+          </button>
           <button
             type="button"
             className="btn btn-secondary"

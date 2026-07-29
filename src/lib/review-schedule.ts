@@ -22,9 +22,9 @@ export function addCalendarDays(ymd: string, days: number): string {
   return `${yy}-${mm}-${dd}`;
 }
 
-/** Ngày bắt đầu chiến dịch sớm nhất: ngày mai (VN) — chặn hôm nay và quá khứ. */
+/** Ngày sớm nhất được chọn: hôm nay (VN) — không chọn ngày đã qua. */
 export function vnMinCampaignStartDate(now = new Date()): string {
-  return addCalendarDays(vnCalendarDateString(now), 1);
+  return vnCalendarDateString(now);
 }
 
 /** Đầu ngày theo lịch VN (UTC instant). */

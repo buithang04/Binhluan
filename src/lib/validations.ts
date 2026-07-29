@@ -152,25 +152,25 @@ export const projectCreateSchema = z
       return;
     }
     const minStart = vnMinCampaignStartDate();
-    // So sánh YYYY-MM-DD (input type=date) theo lịch VN — chặn hôm nay và ngày đã qua
+    // So sánh YYYY-MM-DD (input type=date) theo lịch VN — chặn ngày đã qua
     if (data.startAt < minStart) {
       ctx.addIssue({
         code: "custom",
-        message: "Ngày bắt đầu phải từ ngày mai trở đi (không chọn hôm nay hoặc ngày đã qua)",
+        message: "Ngày bắt đầu không được trước hôm nay",
         path: ["startAt"],
       });
     }
     if (data.endAt < minStart) {
       ctx.addIssue({
         code: "custom",
-        message: "Ngày kết thúc phải từ ngày mai trở đi (không chọn hôm nay hoặc ngày đã qua)",
+        message: "Ngày kết thúc không được trước hôm nay",
         path: ["endAt"],
       });
     }
-    if (start >= end) {
+    if (start > end) {
       ctx.addIssue({
         code: "custom",
-        message: "Ngày bắt đầu phải trước ngày kết thúc",
+        message: "Ngày bắt đầu phải trước hoặc bằng ngày kết thúc",
         path: ["endAt"],
       });
     }
