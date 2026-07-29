@@ -8,6 +8,7 @@ import {
   addCalendarDays,
   vnMinCampaignStartDate,
 } from "@/lib/review-schedule";
+import { DESCRIPTION_MAX_LENGTH } from "@/lib/validations";
 
 type Package = {
   id: string;
@@ -295,6 +296,9 @@ export function ProjectForm({
 
   function validateStep2(): string | null {
     if (!brandName.trim()) return "Vui lòng nhập Brand Name";
+    if (brandDescription.trim().length > DESCRIPTION_MAX_LENGTH) {
+      return `Mô tả doanh nghiệp tối đa ${DESCRIPTION_MAX_LENGTH} ký tự`;
+    }
     for (let i = 0; i < products.length; i++) {
       const p = products[i];
       if (!p.name.trim() || p.name.trim().length < 2) {
@@ -302,6 +306,9 @@ export function ProjectForm({
       }
       if (!p.description.trim() || p.description.trim().length < 10) {
         return `Mô tả sản phẩm ${i + 1} cần ít nhất 10 ký tự`;
+      }
+      if (p.description.trim().length > DESCRIPTION_MAX_LENGTH) {
+        return `Mô tả sản phẩm ${i + 1} tối đa ${DESCRIPTION_MAX_LENGTH} ký tự`;
       }
     }
     return null;
@@ -706,6 +713,7 @@ export function ProjectForm({
           className="input min-h-24"
           value={brandDescription}
           onChange={(e) => setBrandDescription(e.target.value)}
+          maxLength={DESCRIPTION_MAX_LENGTH}
         />
       </Field>
       <div className="grid gap-4 sm:grid-cols-2">
@@ -769,8 +777,9 @@ export function ProjectForm({
                 className="input min-h-16"
                 value={p.description}
                 onChange={(e) => updateProduct(i, "description", e.target.value)}
-                placeholder="Mô tả ngắn (≥10 ký tự)"
+                placeholder={`Mô tả (≥10 ký tự, tối đa ${DESCRIPTION_MAX_LENGTH})`}
                 minLength={10}
+                maxLength={DESCRIPTION_MAX_LENGTH}
                 required={showBusiness}
               />
             </Field>

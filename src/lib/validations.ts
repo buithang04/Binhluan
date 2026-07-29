@@ -1,6 +1,9 @@
 import { z } from "zod";
 import { vnMinCampaignStartDate } from "@/lib/review-schedule";
 
+/** Giới hạn ký tự cho mô tả doanh nghiệp / sản phẩm. */
+export const DESCRIPTION_MAX_LENGTH = 10_000;
+
 const ratingSchema = z
   .union([z.string(), z.number(), z.null(), z.undefined()])
   .transform((v) => {
@@ -50,7 +53,11 @@ export const optionalContentWordCountSchema = z.preprocess(
 
 export const productInputSchema = z.object({
   name: z.string().trim().min(2, "Tên sản phẩm tối thiểu 2 ký tự"),
-  description: z.string().trim().min(10, "Mô tả sản phẩm tối thiểu 10 ký tự"),
+  description: z
+    .string()
+    .trim()
+    .min(10, "Mô tả sản phẩm tối thiểu 10 ký tự")
+    .max(DESCRIPTION_MAX_LENGTH, `Mô tả sản phẩm tối đa ${DESCRIPTION_MAX_LENGTH} ký tự`),
 });
 
 export const projectCreateSchema = z
@@ -69,7 +76,7 @@ export const projectCreateSchema = z
     ])),
     brandDescription: z.preprocess(
       (v) => (v == null ? "" : String(v)).trim(),
-      z.string(),
+      z.string().max(DESCRIPTION_MAX_LENGTH, `Mô tả tối đa ${DESCRIPTION_MAX_LENGTH} ký tự`),
     ),
     targetAudience: z.preprocess(
       (v) => (v == null ? "" : String(v)).trim(),
@@ -214,7 +221,7 @@ export const adminPasswordResetSchema = z.object({
 
 export const businessProductSchema = z.object({
   name: z.string().trim().min(2).max(200),
-  description: z.string().trim().min(10).max(2000),
+  description: z.string().trim().min(10).max(DESCRIPTION_MAX_LENGTH),
 });
 
 export const businessCreateSchema = z.object({
@@ -223,7 +230,7 @@ export const businessCreateSchema = z.object({
     if (v === null || v === undefined || v === "") return null;
     return String(v).trim();
   }, z.union([z.string().url("Website không hợp lệ").max(500), z.null()])),
-  brandDescription: z.string().trim().max(5000).optional().default(""),
+  brandDescription: z.string().trim().max(DESCRIPTION_MAX_LENGTH).optional().default(""),
   targetAudience: z.string().trim().max(2000).optional().default(""),
   targetMarket: z.string().trim().max(2000).optional().default(""),
   writingNotes: z

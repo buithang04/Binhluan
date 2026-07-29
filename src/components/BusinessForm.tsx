@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
+import { DESCRIPTION_MAX_LENGTH } from "@/lib/validations";
 
 export type BusinessProductInput = { name: string; description: string };
 
@@ -144,6 +145,7 @@ export function BusinessForm({ mode, initial, onCancel, onSaved }: Props) {
             className="input min-h-24"
             value={brandDescription}
             onChange={(e) => setBrandDescription(e.target.value)}
+            maxLength={DESCRIPTION_MAX_LENGTH}
           />
         </label>
         <label className="block space-y-1 text-sm">
@@ -206,6 +208,7 @@ export function BusinessForm({ mode, initial, onCancel, onSaved }: Props) {
                 onChange={(e) => updateProduct(i, "description", e.target.value)}
                 required
                 minLength={10}
+                maxLength={DESCRIPTION_MAX_LENGTH}
               />
             </label>
             {products.length > 1 && (

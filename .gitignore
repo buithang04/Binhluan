@@ -37,6 +37,10 @@ yarn-error.log*
 # uploads
 /uploads
 
+# database backups (giữ local, không đẩy git)
+/database/*.sql
+!/database/fix-packages-encoding.sql
+
 # worker runtime data (Chrome profiles — hàng chục nghìn file)
 /automation-profile-manager/apps/worker/data/
 
