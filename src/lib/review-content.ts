@@ -1,4 +1,3 @@
-import { callDeepSeekPayload } from "@/lib/deepseek";
 import { fallbackReviewText, planReviewStars } from "@/lib/review-planner";
 import { buildProjectVariables, resolveSpinTemplate } from "@/lib/spin";
 
@@ -74,14 +73,6 @@ export type ProjectForReviewContent = {
   products: { name: string; description: string }[];
 };
 
-const STAR_LABELS: Record<number, string> = {
-  5: "rất tích cực, hài lòng cao",
-  4: "tích cực, có vài điểm nhỏ cần cải thiện",
-  3: "trung bình, cân bằng ưu và nhược",
-  2: "chưa hài lòng, thất vọng nhẹ",
-  1: "tiêu cực, cần cải thiện rõ ràng",
-};
-
 /** Tính phân bổ sao — luôn dùng số bình luận của gói. */
 export function computeProjectStarPlan(project: ProjectForStarPlan) {
   const inputs = getStarPlanInputs(project);
@@ -144,65 +135,39 @@ export function resolveReviewTextForStar(
   return fallbackReviewText(stars, brandHint ?? project.brandName);
 }
 
-/** Sinh spin template cho 1 mức sao qua DeepSeek. */
+/** Sinh spin template cho 1 mức sao qua DeepSeek (dùng contentPromptJson nếu có). */
 export async function generateStarSpinTemplate(
-  project: ProjectForReviewContent,
+  project: ProjectForReviewContent & {
+    googleMapsUrl?: string;
+    contentPromptJson?: string | null;
+  },
   stars: number,
 ): Promise<{ template: string | null; error?: string }> {
   const star = Math.min(5, Math.max(1, Math.round(stars)));
-  const isEn = project.contentLanguage === "EN";
-  const lang = isEn ? "English" : "Vietnamese";
-  const wordHint =
-    project.contentWordCount != null
-      ? `About ${project.contentWordCount} words when resolved.`
-      : "About 40-80 words when resolved.";
+  const { generateWithPromptJson } = await import("@/lib/deepseek");
+  const { DEFAULT_STAR_SPIN_PROMPT_JSON } = await import("@/lib/prompt-template");
 
-  const productList = project.products
-    .map((p, i) => `${i + 1}. ${p.name}: ${p.description}`)
-    .join("\n");
+  const promptJson =
+    project.contentPromptJson?.trim() || DEFAULT_STAR_SPIN_PROMPT_JSON;
 
-  const messages = [
+  const result = await generateWithPromptJson(
+    promptJson,
     {
-      role: "system" as const,
-      content: isEn
-        ? `You write Google Maps review spin templates in ${lang}. Output ONLY the template text using {option1|option2|option3} blocks for variable phrases. No JSON, no explanation. Each block should have 3-5 natural alternatives. The review tone must match ${star} stars: ${STAR_LABELS[star]}.`
-        : `Bạn viết template spin bình luận Google Maps bằng tiếng Việt. Chỉ trả về template dùng cú pháp {lựa chọn 1|lựa chọn 2|lựa chọn 3} cho các cụm có thể thay đổi. Không JSON, không giải thích. Mỗi block 3-5 phương án tự nhiên. Giọng văn phải phù hợp ${star} sao: ${STAR_LABELS[star]}.`,
+      brandName: project.brandName,
+      website: project.website,
+      brandDescription: project.brandDescription,
+      targetAudience: project.targetAudience,
+      targetMarket: project.targetMarket,
+      writingNotes: project.writingNotes,
+      googleMapsUrl: project.googleMapsUrl || "",
+      contentDirection: project.contentDirection,
+      contentLanguage: project.contentLanguage,
+      contentExample: project.contentExample,
+      contentWordCount: project.contentWordCount,
+      products: project.products,
     },
-    {
-      role: "user" as const,
-      content: isEn
-        ? `Brand: ${project.brandName}
-Website: ${project.website || "n/a"}
-Description: ${project.brandDescription}
-Audience: ${project.targetAudience}
-Market: ${project.targetMarket}
-Products:
-${productList}
-Direction: ${project.contentDirection || "n/a"}
-Reference: ${project.contentExample || "n/a"}
-${wordHint}
-
-Write ONE spin template for a ${star}-star Google Maps review. Use {a|b|c} for openings, body phrases, and closings. Mention the place naturally.`
-        : `Thương hiệu: ${project.brandName}
-Website: ${project.website || "n/a"}
-Mô tả: ${project.brandDescription}
-Khách hàng: ${project.targetAudience}
-Thị trường: ${project.targetMarket}
-Sản phẩm:
-${productList}
-Định hướng: ${project.contentDirection || "n/a"}
-Ví dụ: ${project.contentExample || "n/a"}
-${wordHint}
-
-Viết 1 template spin cho bình luận Google Maps ${star} sao. Dùng {a|b|c} cho mở đầu, nội dung, kết. Nhắc địa điểm tự nhiên.`,
-    },
-  ];
-
-  const result = await callDeepSeekPayload({
-    messages,
-    temperature: 0.9,
-    max_tokens: 600,
-  });
+    { stars: star },
+  );
 
   if (!result.text) {
     return { template: null, error: result.error || "DeepSeek không trả về template" };
@@ -225,7 +190,10 @@ Viết 1 template spin cho bình luận Google Maps ${star} sao. Dùng {a|b|c} c
 
 /** Sinh spin cho tất cả mức sao cần dùng (song song). */
 export async function generateAllStarSpins(
-  project: ProjectForReviewContent,
+  project: ProjectForReviewContent & {
+    googleMapsUrl?: string;
+    contentPromptJson?: string | null;
+  },
   starLevels: number[],
 ): Promise<{ spinByStar: ReviewSpinByStar; errors: string[] }> {
   const spinByStar: ReviewSpinByStar = {};

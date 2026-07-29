@@ -16,6 +16,7 @@ const bodySchema = z.object({
   promptJson: z.string().optional(),
   templateId: z.string().optional(),
   callDeepSeek: z.boolean().optional(),
+  stars: z.number().int().min(1).max(5).optional(),
 });
 
 export async function POST(req: Request, ctx: Ctx) {
@@ -55,29 +56,12 @@ export async function POST(req: Request, ctx: Ctx) {
     }
   }
 
-  const ctxJson = {
-    project: {
-      brand_name: project.brandName,
-      website: project.website || "",
-      brand_description: project.brandDescription,
-      target_audience: project.targetAudience,
-      target_market: project.targetMarket,
-      writing_notes: project.writingNotes || "",
-      product_list: project.products
-        .map((p, i) => `${i + 1}. ${p.name}: ${p.description}`)
-        .join("\n"),
-      first_product: project.products[0]?.name || "",
-      google_maps_url: project.googleMapsUrl,
-    },
-    settings: {
-      content_direction: project.contentDirection || "",
-      content_language: project.contentLanguage === "EN" ? "English" : "Vietnamese",
-      content_example: project.contentExample || "",
-      content_word_count:
-        project.contentWordCount != null ? String(project.contentWordCount) : "",
-    },
-    ...(spinText ? { spin: { resolved_text: spinText } } : {}),
-  };
+  const sampleStars = body.data.stars ?? 5;
+  const { buildPromptContext } = await import("@/lib/prompt-template");
+  const ctxJson = buildPromptContext(project, {
+    spinText,
+    stars: sampleStars,
+  });
 
   const { payload, error } = resolvePromptJson(promptJson, ctxJson);
   if (error || !payload) {
@@ -91,7 +75,10 @@ export async function POST(req: Request, ctx: Ctx) {
     });
   }
 
-  const gen = await generateWithPromptJson(promptJson, project, spinText);
+  const gen = await generateWithPromptJson(promptJson, project, {
+    spinText,
+    stars: sampleStars,
+  });
   if (gen.error) {
     return NextResponse.json({ error: gen.error, resolvedPayload: payload }, { status: 502 });
   }

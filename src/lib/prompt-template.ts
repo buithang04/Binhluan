@@ -171,6 +171,26 @@ export const DEFAULT_DEEPSEEK_PROMPT_JSON = `{
   ]
 }`;
 
+/**
+ * Prompt mặc định khi sinh template spin theo sao (nội dung bình luận theo sao).
+ * Biến {{ $json.settings.stars }} được inject theo từng mức sao khi generate.
+ */
+export const DEFAULT_STAR_SPIN_PROMPT_JSON = `{
+  "model": "deepseek-chat",
+  "temperature": 0.9,
+  "max_tokens": 600,
+  "messages": [
+    {
+      "role": "system",
+      "content": "Bạn viết template spin bình luận Google Maps bằng {{ $json.settings.content_language }}. Chỉ trả về template dùng cú pháp {lựa chọn 1|lựa chọn 2|lựa chọn 3} cho các cụm có thể thay đổi. Không JSON, không giải thích. Mỗi block 3-5 phương án tự nhiên. Giọng văn phải phù hợp {{ $json.settings.stars }} sao: {{ $json.settings.star_label }}."
+    },
+    {
+      "role": "user",
+      "content": "Thương hiệu: {{ $json.project.brand_name }}\\nWebsite: {{ $json.project.website }}\\nMô tả: {{ $json.project.brand_description }}\\nKhách hàng: {{ $json.project.target_audience }}\\nThị trường: {{ $json.project.target_market }}\\nSản phẩm:\\n{{ $json.project.product_list }}\\n\\nĐịnh hướng: {{ $json.settings.content_direction }}\\nVí dụ: {{ $json.settings.content_example }}\\nSố từ khi resolve: {{ $json.settings.content_word_count }}\\n\\nViết 1 template spin cho bình luận Google Maps {{ $json.settings.stars }} sao. Dùng {a|b|c} cho mở đầu, nội dung, kết. Nhắc địa điểm tự nhiên."
+    }
+  ]
+}`;
+
 /** Danh sách biến hiển thị trên UI (path n8n). */
 export const PROMPT_VARIABLE_GROUPS: {
   label: string;
@@ -197,6 +217,8 @@ export const PROMPT_VARIABLE_GROUPS: {
       { path: "$json.settings.content_language", label: "Ngôn ngữ" },
       { path: "$json.settings.content_example", label: "Ví dụ tham khảo" },
       { path: "$json.settings.content_word_count", label: "Số từ" },
+      { path: "$json.settings.stars", label: "Mức sao (khi sinh)" },
+      { path: "$json.settings.star_label", label: "Nhãn giọng theo sao" },
     ],
   },
   {
@@ -255,6 +277,14 @@ export function resolvePromptJson(
   return { payload: resolved };
 }
 
+const STAR_LABELS_FOR_PROMPT: Record<number, string> = {
+  5: "rất tích cực, hài lòng cao",
+  4: "tích cực, có vài điểm nhỏ cần cải thiện",
+  3: "trung bình, cân bằng ưu và nhược",
+  2: "chưa hài lòng, thất vọng nhẹ",
+  1: "tiêu cực, cần cải thiện rõ ràng",
+};
+
 export function buildPromptContext(
   project: {
     brandName: string;
@@ -270,11 +300,21 @@ export function buildPromptContext(
     contentWordCount?: number | null;
     products: { name: string; description: string }[];
   },
-  spinText?: string,
+  spinTextOrOpts?: string | { spinText?: string; stars?: number },
 ): PromptContextJson {
+  const opts =
+    typeof spinTextOrOpts === "string"
+      ? { spinText: spinTextOrOpts }
+      : spinTextOrOpts || {};
+
   const productList = project.products
     .map((p, i) => `${i + 1}. ${p.name}: ${p.description}`)
     .join("\n");
+
+  const star =
+    opts.stars != null
+      ? Math.min(5, Math.max(1, Math.round(opts.stars)))
+      : null;
 
   const ctx: PromptContextJson = {
     project: {
@@ -294,11 +334,13 @@ export function buildPromptContext(
       content_example: project.contentExample || "",
       content_word_count:
         project.contentWordCount != null ? String(project.contentWordCount) : "",
+      stars: star != null ? String(star) : "",
+      star_label: star != null ? STAR_LABELS_FOR_PROMPT[star] || "" : "",
     },
   };
 
-  if (spinText != null) {
-    ctx.spin = { resolved_text: spinText };
+  if (opts.spinText != null) {
+    ctx.spin = { resolved_text: opts.spinText };
   }
 
   return ctx;

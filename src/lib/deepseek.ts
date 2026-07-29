@@ -55,10 +55,10 @@ export async function callDeepSeekPayload(
 export async function generateWithPromptJson(
   promptJson: string | null | undefined,
   project: Parameters<typeof buildPromptContext>[0],
-  spinText?: string,
+  spinTextOrOpts?: string | { spinText?: string; stars?: number },
 ): Promise<{ text: string | null; resolvedPayload?: Record<string, unknown>; error?: string }> {
   const raw = promptJson?.trim() || DEFAULT_DEEPSEEK_PROMPT_JSON;
-  const ctx = buildPromptContext(project, spinText);
+  const ctx = buildPromptContext(project, spinTextOrOpts);
   const { payload, error } = resolvePromptJson(raw, ctx);
   if (error || !payload) return { text: null, error: error || "Không resolve được prompt" };
 

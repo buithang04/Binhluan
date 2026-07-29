@@ -122,6 +122,7 @@ export default async function ProjectDetailPage({ params }: Props) {
             contentLanguage: project.contentLanguage,
             contentExample: project.contentExample,
             contentWordCount: project.contentWordCount,
+            contentPromptJson: project.contentPromptJson,
           }}
           initialStarPlan={initialStarPlan}
           initialStarPlanBlockers={initialBlockers}

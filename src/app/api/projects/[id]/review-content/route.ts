@@ -33,6 +33,7 @@ export async function GET(_req: Request, ctx: Ctx) {
       contentLanguage: true,
       contentExample: true,
       contentWordCount: true,
+      contentPromptJson: true,
     },
   });
   if (!project) {
@@ -47,6 +48,7 @@ export async function GET(_req: Request, ctx: Ctx) {
       contentLanguage: project.contentLanguage,
       contentExample: project.contentExample,
       contentWordCount: project.contentWordCount,
+      contentPromptJson: project.contentPromptJson,
     },
   });
 }
