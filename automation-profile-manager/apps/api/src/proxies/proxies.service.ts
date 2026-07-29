@@ -150,9 +150,39 @@ export class ProxiesService {
    * Queue runtime: random 1 proxy không bị lock + hết cooldown.
    * Dùng atomic updateMany để tránh 2 job lấy cùng proxy khi chạy song song.
    */
-  async acquireRandomForJob(jobRunId: string, lockMinutes = 30) {
+  async acquireRandomForJob(
+    jobRunId: string,
+    lockMinutes = 30,
+    preferredProxyId?: string | null,
+  ) {
     const now = new Date();
     const lockUntil = new Date(now.getTime() + lockMinutes * 60_000);
+
+    // Sticky: ưu tiên proxy cũ — bỏ qua cooldown (cùng profile retry MAPS không
+    // được đổi proxy kẻo worker phải kill Chrome đang mở Maps).
+    if (preferredProxyId) {
+      const sticky = await this.prisma.proxy.updateMany({
+        where: {
+          id: preferredProxyId,
+          status: "ACTIVE",
+          health: "WORKING",
+          OR: [{ lockedUntil: null }, { lockedUntil: { lt: now } }],
+        },
+        data: {
+          lockedUntil: lockUntil,
+          lockedByJobId: jobRunId,
+          cooldownUntil: null,
+        },
+      });
+      if (sticky.count === 1) {
+        console.log(
+          `[proxies] sticky proxy ${preferredProxyId.slice(0, 8)}… for job ${jobRunId.slice(0, 8)}…`,
+        );
+        return this.prisma.proxy.findUniqueOrThrow({
+          where: { id: preferredProxyId },
+        });
+      }
+    }
 
     const candidates = await this.prisma.proxy.findMany({
       where: {

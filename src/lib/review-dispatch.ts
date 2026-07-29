@@ -291,6 +291,73 @@ async function recoverStuckAssignments(now: Date): Promise<void> {
   const STALE_QUEUED_MS = 12 * 60_000;
   const STALE_RUNNING_MS = 25 * 60_000;
 
+  // Profile kẹt QUEUED/RUNNING với lease hết hạn — nhả để không chặn lịch đăng.
+  // MAPS_REVIEW lease 30 phút: chỉ nhả khi quá hạn >5 phút (tránh cướp job đang đăng).
+  // HEALTHCHECK/khác: nhả sau 2 phút quá hạn.
+  const stuckProfiles = await prisma.profile.findMany({
+    where: {
+      status: { in: ["QUEUED", "RUNNING"] },
+      leaseUntil: { not: null, lt: now },
+    },
+    select: {
+      id: true,
+      browserIndex: true,
+      currentTask: true,
+      leaseUntil: true,
+    },
+  });
+  for (const p of stuckProfiles) {
+    const expiredMs = now.getTime() - (p.leaseUntil?.getTime() ?? 0);
+    const isMaps = p.currentTask === "MAPS_REVIEW";
+    const graceMs = isMaps ? 5 * 60_000 : 2 * 60_000;
+    if (expiredMs < graceMs) continue;
+
+    // Không fail job MAPS ACTIVE còn trong hạn timeout worker — chỉ nhả lease chết
+    await prisma.jobRun
+      .updateMany({
+        where: {
+          profileId: p.id,
+          status: { in: ["PENDING", "ACTIVE"] },
+          ...(isMaps
+            ? {
+                OR: [
+                  { startedAt: null },
+                  {
+                    startedAt: {
+                      lt: new Date(now.getTime() - 20 * 60_000),
+                    },
+                  },
+                ],
+              }
+            : {}),
+        },
+        data: {
+          status: "FAILED",
+          finishedAt: now,
+          error: "Auto-recover: lease hết hạn — nhả profile để đăng bài theo lịch",
+        },
+      })
+      .catch(() => undefined);
+    await prisma.profile
+      .updateMany({
+        where: {
+          id: p.id,
+          status: { in: ["QUEUED", "RUNNING"] },
+          leaseUntil: { lt: now },
+        },
+        data: {
+          status: "READY",
+          leaseToken: null,
+          leaseUntil: null,
+          currentTask: null,
+        },
+      })
+      .catch(() => undefined);
+    console.log(
+      `[review-dispatch] auto-recover profile #${p.browserIndex}: lease ${p.currentTask ?? "?"} hết hạn → READY`,
+    );
+  }
+
   const stuck = await prisma.reviewAssignment.findMany({
     where: {
       status: { in: ["QUEUED", "RUNNING"] },

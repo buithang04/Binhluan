@@ -534,37 +534,68 @@ async function connectOrLaunchBrowser(
   await ensureDir(userDataDir);
 
   if (profileDirInUse(userDataDir)) {
-    // Orphan không proxy: chỉ reconnect khi cũng không cần proxy (LOGIN).
-    // Job cần proxy → kill + launch lại cùng profile + --proxy-server.
-    if (!wantProxy) {
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const port = await readDevToolsPort(userDataDir);
-        if (port && (await isDevToolsReachable(port))) {
-          try {
-            const browser = await puppeteer.connect({
-              browserURL: `http://127.0.0.1:${port}`,
-              defaultViewport: null,
-            });
-            if (wantProxy && claim.proxy) {
-              await bindProxyAuthToBrowser(browser, claim.proxy);
-            }
-            const pid = await resolveChromePidByProfileDir(userDataDir);
+    // Ưu tiên RECONNECT — không kill Chrome đang mở (đặc biệt khi đang ở Maps).
+    // Chỉ kill khi bắt buộc: Chrome orphan không CDP, hoặc proxy cmdline ≠ job proxy.
+    const wantLabel =
+      wantProxy && claim.proxy
+        ? `${claim.proxy.host}:${claim.proxy.port}`
+        : null;
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const port = await readDevToolsPort(userDataDir);
+      if (!port || !(await isDevToolsReachable(port))) {
+        await new Promise((r) => setTimeout(r, 400));
+        continue;
+      }
+      try {
+        const existingProxy = await readChromeProxyFromProfileDir(userDataDir);
+        if (wantProxy && wantLabel) {
+          if (!existingProxy) {
             console.log(
-              `[worker] reconnect #${claim.profile.browserIndex} via DevTools :${port} (${claim.account.email})`,
+              `[worker] #${claim.profile.browserIndex} Chrome đang mở KHÔNG proxy — cần kill để gắn proxy ${wantLabel}`,
             );
-            return { browser, reused: true, mode: "devtools", pid };
-          } catch (e) {
-            console.warn(
-              `[worker] DevTools reconnect #${claim.profile.browserIndex} attempt ${attempt + 1} failed:`,
-              e instanceof Error ? e.message : e,
+            break; // ra vòng for → kill bên dưới
+          }
+          const have = `${existingProxy.host}:${existingProxy.port}`;
+          if (have !== wantLabel) {
+            console.log(
+              `[worker] #${claim.profile.browserIndex} Chrome proxy=${have} ≠ job ${wantLabel} — kill rồi mở lại`,
             );
+            break;
           }
         }
-        await new Promise((r) => setTimeout(r, 400));
+        if (!wantProxy && existingProxy) {
+          // LOGIN muốn IP máy nhưng Chrome đang có proxy → kill
+          console.log(
+            `[worker] #${claim.profile.browserIndex} Chrome đang có proxy=${existingProxy.host}:${existingProxy.port} nhưng LOGIN cần IP máy — kill`,
+          );
+          break;
+        }
+
+        const browser = await puppeteer.connect({
+          browserURL: `http://127.0.0.1:${port}`,
+          defaultViewport: null,
+        });
+        if (wantProxy && claim.proxy) {
+          await bindProxyAuthToBrowser(browser, claim.proxy);
+        }
+        const pid = await resolveChromePidByProfileDir(userDataDir);
+        console.log(
+          `[worker] reconnect #${claim.profile.browserIndex} via DevTools :${port} proxy=${wantLabel ?? "OFF"} (${claim.account.email}) — KHÔNG kill`,
+        );
+        return { browser, reused: true, mode: "devtools", pid };
+      } catch (e) {
+        console.warn(
+          `[worker] DevTools reconnect #${claim.profile.browserIndex} attempt ${attempt + 1} failed:`,
+          e instanceof Error ? e.message : e,
+        );
       }
+      await new Promise((r) => setTimeout(r, 400));
     }
+
+    // Không reconnect được / proxy lệch → kill (có log rõ)
     console.log(
-      `[worker] #${claim.profile.browserIndex} profile dir locked — kill orphan Chrome rồi launch lại (proxy=${wantProxy ? "ON" : "OFF"})`,
+      `[worker] #${claim.profile.browserIndex} profile dir locked — kill orphan rồi launch (proxy=${wantProxy ? wantLabel ?? "ON" : "OFF"})`,
     );
     await killChromeUsingProfileDir(userDataDir);
     await new Promise((r) => setTimeout(r, 800));
@@ -577,6 +608,26 @@ async function connectOrLaunchBrowser(
     const msg = e instanceof Error ? e.message : String(e);
     if (/already running|user data directory is already in use/i.test(msg)) {
       console.warn(`[worker] launch conflict #${claim.profile.browserIndex}: ${msg}`);
+      // Thử reconnect lần cuối trước khi kill
+      const port = await readDevToolsPort(userDataDir);
+      if (port && (await isDevToolsReachable(port))) {
+        try {
+          const browser = await puppeteer.connect({
+            browserURL: `http://127.0.0.1:${port}`,
+            defaultViewport: null,
+          });
+          if (wantProxy && claim.proxy) {
+            await bindProxyAuthToBrowser(browser, claim.proxy);
+          }
+          const pid = await resolveChromePidByProfileDir(userDataDir);
+          console.log(
+            `[worker] launch conflict → reconnect #${claim.profile.browserIndex} :${port}`,
+          );
+          return { browser, reused: true, mode: "devtools-conflict", pid };
+        } catch {
+          /* fall through kill */
+        }
+      }
       await killChromeUsingProfileDir(userDataDir);
       await new Promise((r) => setTimeout(r, 1000));
       const launched = await launchBrowser(claim, { useProxy: wantProxy });
@@ -2955,6 +3006,43 @@ function profileDirInUse(userDataDir: string) {
     existsSync(path.join(userDataDir, "lockfile")) ||
     existsSync(path.join(userDataDir, "DevToolsActivePort"))
   );
+}
+
+/** Đọc --proxy-server=host:port từ Chrome đang giữ user-data-dir (không kill). */
+async function readChromeProxyFromProfileDir(
+  userDataDir: string,
+): Promise<{ host: string; port: number } | null> {
+  const abs = path.resolve(userDataDir);
+  if (process.platform !== "win32") return null;
+  try {
+    const { execFile } = await import("child_process");
+    const { promisify } = await import("util");
+    const execFileAsync = promisify(execFile);
+    const needle = abs.replace(/'/g, "''");
+    const ps = `
+$needle = '${needle}'
+Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction SilentlyContinue |
+  Where-Object { $_.CommandLine -and ($_.CommandLine.IndexOf($needle, [StringComparison]::OrdinalIgnoreCase) -ge 0) } |
+  ForEach-Object {
+    if ($_.CommandLine -match '--proxy-server=(?:https?://)?([^:\\s]+):(\\d+)') {
+      Write-Output ($Matches[1] + ':' + $Matches[2])
+      return
+    }
+  }
+`;
+    const { stdout } = await execFileAsync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", ps],
+      { timeout: 8_000, windowsHide: true, encoding: "utf8" },
+    );
+    const line = String(stdout || "").trim().split(/\r?\n/).find((l) => l.includes(":"));
+    if (!line) return null;
+    const m = line.match(/^([^:]+):(\d+)$/);
+    if (!m) return null;
+    return { host: m[1]!, port: Number(m[2]) };
+  } catch {
+    return null;
+  }
 }
 
 /** Kill Chrome đang giữ user-data-dir (orphan sau worker crash). */
