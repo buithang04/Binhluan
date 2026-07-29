@@ -211,12 +211,9 @@ export class InternalService {
     // Giữ READY nếu late-ready đã set trước khi complete (tránh race ghi đè UNREADY)
     const alreadyReady = profile.status === "READY" || accountWasReady;
 
-    // LOGIN OK → READY dù Chrome vừa disconnect (worker reload). Alive + đã READY → giữ READY.
-    // Alive nhưng chưa login → UNREADY. Browser tắt + chưa login OK → UNREADY.
-    const profileStatus =
-      markReady || (browserAlive && alreadyReady)
-        ? "READY"
-        : "UNREADY";
+    // LOGIN OK → READY. Giữ READY nếu browserEvent/late-ready đã set trước complete
+    // (tránh race: ready xong CDP disconnect → complete ghi đè UNREADY).
+    const profileStatus = markReady || alreadyReady ? "READY" : "UNREADY";
 
     await this.prisma.$transaction(async (tx) => {
       await tx.profile.update({

@@ -3,6 +3,7 @@
 import { useSession } from "next-auth/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { StatusLight, formatAliveLabel, formatLoginStatus } from "@/components/StatusLight";
+import { AdminLiveBrowserSync } from "@/components/AdminLiveBrowserSync";
 import { apmFetch } from "@/lib/apm-client";
 import {
   downloadAccountsTemplate,
@@ -61,6 +62,17 @@ function isPermanentLoginIssue(issue?: string | null): boolean {
 function isWaitingManualSolve(issue?: string | null): boolean {
   const v = (issue || "").toUpperCase();
   return v === "RECAPTCHA" || v === "CHALLENGE";
+}
+
+function needsLiveStatus(list: Account[]): boolean {
+  return list.some(
+    (a) =>
+      a.status !== "READY" ||
+      a.loginIssue ||
+      a.profile?.browserAlive ||
+      a.profile?.status === "QUEUED" ||
+      a.profile?.status === "RUNNING",
+  );
 }
 
 function accountsSnapshot(list: Account[]): string {
@@ -196,25 +208,14 @@ export default function AdminAccountsPage() {
   useEffect(() => {
     void load();
 
-    const needsLiveStatus = (list: Account[]) =>
-      list.some(
-        (a) =>
-          a.status !== "READY" ||
-          a.loginIssue ||
-          a.profile?.browserAlive ||
-          a.profile?.status === "QUEUED" ||
-          a.profile?.status === "RUNNING",
-      );
-
     const tick = () => {
       if (typeof document !== "undefined" && document.hidden) return;
-      // Chỉ poll khi còn account đang login / browser sống — tránh fetch full list mỗi 8s
       setRows((current) => {
         if (needsLiveStatus(current)) void load({ silent: true });
         return current;
       });
     };
-    const t = setInterval(tick, 20_000);
+    const t = setInterval(tick, 8_000);
     const onVis = () => {
       if (!document.hidden) void load({ silent: true });
     };
@@ -563,9 +564,24 @@ export default function AdminAccountsPage() {
           : `Đang mở Chrome #${idx} đăng nhập…`,
       );
       setBusyId(null);
-      for (let i = 0; i < 4; i++) {
-        await new Promise((r) => setTimeout(r, 1200));
-        await load({ silent: true });
+      const targetId = account.id;
+      const deadline = Date.now() + 90_000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2000));
+        if (!token) break;
+        try {
+          const list = await apmFetch<Account[]>("/accounts", token);
+          setRows((prev) =>
+            accountsSnapshot(prev) === accountsSnapshot(list) ? prev : list,
+          );
+          const fresh = list.find((a) => a.id === targetId);
+          if (fresh?.status === "READY" || fresh?.profile?.status === "READY") {
+            setMessage(`Chrome #${idx} — đăng nhập thành công (READY).`);
+            break;
+          }
+        } catch {
+          /* poll tiếp */
+        }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -750,6 +766,11 @@ export default function AdminAccountsPage() {
 
   return (
     <div className="space-y-5">
+      <AdminLiveBrowserSync
+        token={token}
+        enabled={needsLiveStatus(rows)}
+        onChange={() => void load({ silent: true })}
+      />
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="page-title">Tài khoản Google</h1>
