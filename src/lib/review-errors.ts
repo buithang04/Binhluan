@@ -62,6 +62,10 @@ const ERROR_RULES: { test: RegExp; message: string }[] = [
     message: "Không chọn được số sao trên form Maps",
   },
   {
+    test: /nút đăng chưa sẵn sàng|thiếu sao\/nội dung/i,
+    message: "Form Maps chưa sẵn sàng đăng — kiểm tra sao / nội dung / hộp hủy đánh giá",
+  },
+  {
     test: /không nhập được bình luận/i,
     message: "Không nhập được nội dung bình luận trên Maps",
   },

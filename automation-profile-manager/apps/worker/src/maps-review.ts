@@ -204,37 +204,219 @@ async function verifyReviewPosted(page: Page, reviewText: string): Promise<boole
   return false;
 }
 
-async function waitReviewFrame(page: Page, timeoutMs = 25000): Promise<Frame> {
+/** Điểm số form review trong 1 frame — ưu tiên có cả sao + textarea. */
+async function scoreReviewFrame(frame: Frame): Promise<number> {
+  try {
+    return await frame.evaluate(() => {
+      let score = 0;
+      const url = location.href || "";
+      if (/ReviewsService\.LoadWriteWidget|writereview|WriteWidget/i.test(url)) {
+        score += 50;
+      }
+      if (document.querySelector('div[role="radiogroup"], [data-rating], [role="radio"]')) {
+        score += 30;
+      }
+      if (document.querySelector("textarea")) score += 20;
+      if (document.querySelector('button[jsname="IJM3w"]')) score += 10;
+      // Sao theo aria-label (UI Maps mới đôi khi không có data-rating)
+      const labeled = Array.from(
+        document.querySelectorAll("[aria-label], button, div, span"),
+      ).some((el) =>
+        /\b([1-5])\s*(sao|stars?)\b/i.test(el.getAttribute("aria-label") || ""),
+      );
+      if (labeled) score += 25;
+      return score;
+    });
+  } catch {
+    return 0;
+  }
+}
+
+async function waitReviewFrame(page: Page, timeoutMs = 35_000): Promise<Frame> {
   const start = Date.now();
+  let bestFrame: Frame | null = null;
+  let bestScore = 0;
+
   while (Date.now() - start < timeoutMs) {
     for (const frame of page.frames()) {
-      const url = frame.url();
-      if (!/ReviewsService\.LoadWriteWidget|writereview|WriteWidget/i.test(url)) {
-        continue;
+      const score = await scoreReviewFrame(frame);
+      if (score < 20) continue;
+      if (score > bestScore) {
+        bestScore = score;
+        bestFrame = frame;
       }
-      try {
-        const has = await frame.evaluate(
-          () =>
-            !!document.querySelector(
-              'textarea, div[role="radiogroup"], [data-rating], button[jsname="IJM3w"]',
-            ),
-        );
-        if (has) return frame;
-      } catch {
-        /* ignore */
+      // Đủ mạnh (widget + sao hoặc textarea) → lấy luôn
+      if (score >= 70) {
+        console.log(`[maps-review] form frame score=${score}`);
+        return frame;
       }
     }
-    for (const frame of page.frames()) {
-      if (frame === page.mainFrame()) continue;
-      try {
-        if (await frame.$("textarea")) return frame;
-      } catch {
-        /* ignore */
-      }
+    if (bestFrame && bestScore >= 40 && Date.now() - start > 8_000) {
+      console.log(`[maps-review] form frame score=${bestScore} (partial)`);
+      return bestFrame;
     }
-    await sleep(500);
+    await sleep(400);
+  }
+
+  if (bestFrame && bestScore >= 20) {
+    console.log(`[maps-review] form frame score=${bestScore} (timeout best)`);
+    return bestFrame;
   }
   throw new Error("Không tìm thấy iframe form đánh giá");
+}
+
+/** Đọc số sao đang chọn trong form (nếu có). */
+async function readSelectedRating(frame: Frame): Promise<number | null> {
+  try {
+    return await frame.evaluate(() => {
+      const checked =
+        (document.querySelector(
+          '[role="radio"][aria-checked="true"], [data-rating][aria-checked="true"], [aria-checked="true"][data-rating]',
+        ) as HTMLElement | null) || null;
+      if (checked) {
+        const fromData = Number(checked.getAttribute("data-rating"));
+        if (fromData >= 1 && fromData <= 5) return fromData;
+        const fromPos = Number(checked.getAttribute("aria-posinset"));
+        if (fromPos >= 1 && fromPos <= 5) return fromPos;
+        const label = checked.getAttribute("aria-label") || "";
+        const m = label.match(/\b([1-5])\s*(sao|stars?)\b/i);
+        if (m) return Number(m[1]);
+      }
+      // Một số UI đánh dấu sao đã chọn bằng class / aria-pressed
+      const pressed = Array.from(
+        document.querySelectorAll('[aria-pressed="true"], [data-rating].selected, .s2xyy[aria-checked="true"]'),
+      ) as HTMLElement[];
+      for (const el of pressed) {
+        const r = Number(el.getAttribute("data-rating"));
+        if (r >= 1 && r <= 5) return r;
+      }
+      return null;
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Click sao trong DOM (ưu tiên JS click — ổn định hơn mouse qua iframe).
+ * Trả về via + selected rating sau click.
+ */
+async function clickStarInDom(
+  frame: Frame,
+  value: number,
+): Promise<{ ok: boolean; via: string; selected: number | null }> {
+  const rating = Math.min(5, Math.max(1, Math.round(value)));
+  return frame.evaluate((want) => {
+    const fire = (el: Element) => {
+      const h = el as HTMLElement;
+      h.scrollIntoView({ block: "center", inline: "nearest" });
+      h.dispatchEvent(new MouseEvent("pointerover", { bubbles: true }));
+      h.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+      h.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+      h.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+      h.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      try {
+        h.click();
+      } catch {
+        /* ignore */
+      }
+    };
+
+    const readSelected = (): number | null => {
+      const checked = document.querySelector(
+        '[role="radio"][aria-checked="true"], [data-rating][aria-checked="true"]',
+      ) as HTMLElement | null;
+      if (checked) {
+        const d = Number(checked.getAttribute("data-rating"));
+        if (d >= 1 && d <= 5) return d;
+        const p = Number(checked.getAttribute("aria-posinset"));
+        if (p >= 1 && p <= 5) return p;
+        const m = (checked.getAttribute("aria-label") || "").match(
+          /\b([1-5])\s*(sao|stars?)\b/i,
+        );
+        if (m) return Number(m[1]);
+      }
+      return null;
+    };
+
+    const groups = Array.from(
+      document.querySelectorAll('div[role="radiogroup"]'),
+    ) as HTMLElement[];
+    const roots: HTMLElement[] =
+      groups.length > 0
+        ? groups
+        : ([document.body].filter(Boolean) as HTMLElement[]);
+
+    for (const root of roots) {
+      // 1) data-rating đúng số
+      const byData =
+        (root.querySelector(
+          `div.s2xyy[data-rating="${want}"], [data-rating="${want}"][role="radio"], [data-rating="${want}"]`,
+        ) as HTMLElement | null) || null;
+      if (byData) {
+        fire(byData);
+        return { ok: true, via: "data-rating", selected: readSelected() };
+      }
+
+      // 2) aria-label "4 sao" / "4 stars"
+      const labeled = Array.from(
+        root.querySelectorAll("[aria-label], button, [role='radio'], div, span"),
+      ).find((el) => {
+        const label = (el.getAttribute("aria-label") || "").trim();
+        return new RegExp(`\\b${want}\\s*(sao|stars?)\\b`, "i").test(label);
+      }) as HTMLElement | undefined;
+      if (labeled) {
+        fire(labeled);
+        return { ok: true, via: "aria-label", selected: readSelected() };
+      }
+
+      // 3) aria-posinset
+      const byPos = root.querySelector(
+        `[role="radio"][aria-posinset="${want}"]`,
+      ) as HTMLElement | null;
+      if (byPos) {
+        fire(byPos);
+        return { ok: true, via: "aria-posinset", selected: readSelected() };
+      }
+
+      // 4) Index trong nhóm radio / .s2xyy
+      const clickables = Array.from(
+        root.querySelectorAll(
+          '[role="radio"], div.s2xyy, [data-rating], button[data-rating]',
+        ),
+      ).filter((el) => {
+        const b = (el as HTMLElement).getBoundingClientRect();
+        return b.width >= 10 && b.height >= 10;
+      }) as HTMLElement[];
+      // Chỉ lấy đúng 5 sao đầu nếu nhiều hơn
+      const stars =
+        clickables.length >= 5 ? clickables.slice(0, 5) : clickables;
+      const target = stars[want - 1] || stars[stars.length - 1];
+      if (target && stars.length >= 3) {
+        fire(target);
+        return {
+          ok: true,
+          via: `index:${stars.length}`,
+          selected: readSelected(),
+        };
+      }
+    }
+
+    // 5) Toàn document — SVG sao / button jsaction
+    const globalLabel = Array.from(
+      document.querySelectorAll("[aria-label]"),
+    ).find((el) =>
+      new RegExp(`\\b${want}\\s*(sao|stars?)\\b`, "i").test(
+        el.getAttribute("aria-label") || "",
+      ),
+    ) as HTMLElement | undefined;
+    if (globalLabel) {
+      fire(globalLabel);
+      return { ok: true, via: "global-aria", selected: readSelected() };
+    }
+
+    return { ok: false, via: "none", selected: null };
+  }, rating);
 }
 
 /**
@@ -312,36 +494,139 @@ async function prepareReviewForm(frame: Frame) {
 }
 
 async function selectStar(frame: Frame, value: number, human: HumanCursor) {
+  const rating = Math.min(5, Math.max(1, Math.round(value)));
   await prepareReviewForm(frame);
 
-  let starEl: ElementHandle<Element> | null =
-    (await frame.$(`div[role="radiogroup"] [data-rating="${value}"]`)) ||
-    (await frame.$(`div[role="radiogroup"] div.s2xyy[data-rating="${value}"]`));
-
-  if (!starEl) {
-    const clickables = await frame.$$(
-      'div[role="radiogroup"] [role="radio"], div[role="radiogroup"] .s2xyy',
-    );
-    starEl = clickables[value - 1] ?? clickables[clickables.length - 1] ?? null;
+  // Chờ UI sao xuất hiện (Maps đôi khi render radiogroup chậm sau iframe)
+  const waitStart = Date.now();
+  while (Date.now() - waitStart < 12_000) {
+    const ready = await frame
+      .evaluate(
+        () =>
+          !!document.querySelector(
+            'div[role="radiogroup"], [data-rating], [role="radio"], [aria-label*="sao" i], [aria-label*="star" i]',
+          ),
+      )
+      .catch(() => false);
+    if (ready) break;
+    await sleep(350);
   }
 
-  if (!starEl) throw new Error(`Không chọn được ${value} sao`);
+  let lastVia = "none";
+  for (let attempt = 0; attempt < 8; attempt++) {
+    await prepareReviewForm(frame);
 
-  await human.clickElement(starEl);
-  await sleep(rand(180, 420));
+    // A) Click DOM (ổn định nhất với iframe Maps)
+    const dom = await clickStarInDom(frame, rating).catch(() => ({
+      ok: false as const,
+      via: "err",
+      selected: null as number | null,
+    }));
+    lastVia = dom.via;
+    await sleep(rand(220, 480));
 
-  for (let i = 0; i < 15; i++) {
-    await dismissCancelReviewPrompt(frame);
-    const enabled = await frame.evaluate(() => {
-      const b = document.querySelector('button[jsname="IJM3w"]') as HTMLButtonElement | null;
-      return !!b && !b.disabled && b.getAttribute("aria-disabled") !== "true";
-    });
-    if (enabled) return;
-    if (i === 5 || i === 10) {
-      await human.clickElement(starEl).catch(() => undefined);
+    let selected = (await readSelectedRating(frame)) ?? dom.selected;
+    if (selected === rating) {
+      console.log(
+        `[maps-review] chọn ${rating}★ OK (via=${dom.via}, attempt=${attempt + 1})`,
+      );
+      return;
     }
-    await sleep(400);
+
+    // B) Human mouse click vào element nếu tìm được handle
+    try {
+      const handle =
+        (await frame.$(
+          `div[role="radiogroup"] [data-rating="${rating}"], div.s2xyy[data-rating="${rating}"], [role="radio"][aria-posinset="${rating}"]`,
+        )) ||
+        (
+          await frame.$$(
+            'div[role="radiogroup"] [role="radio"], div[role="radiogroup"] .s2xyy, div[role="radiogroup"] [data-rating]',
+          )
+        )[rating - 1] ||
+        null;
+      if (handle) {
+        await human.clickElement(handle).catch(() => undefined);
+        await sleep(rand(200, 400));
+        selected = await readSelectedRating(frame);
+        if (selected === rating) {
+          console.log(
+            `[maps-review] chọn ${rating}★ OK (human-click, attempt=${attempt + 1})`,
+          );
+          return;
+        }
+      }
+    } catch {
+      /* next */
+    }
+
+    // C) Bàn phím: focus radiogroup rồi ArrowRight / số
+    if (attempt >= 3) {
+      await frame
+        .evaluate((want) => {
+          const group = document.querySelector(
+            'div[role="radiogroup"]',
+          ) as HTMLElement | null;
+          group?.focus?.();
+          const radios = Array.from(
+            group?.querySelectorAll('[role="radio"]') || [],
+          ) as HTMLElement[];
+          const target = radios[want - 1];
+          if (target) {
+            target.focus();
+            target.click();
+          }
+        }, rating)
+        .catch(() => undefined);
+      const page = frame.page();
+      // Gõ số rating (một số widget Maps nhận phím)
+      await page.keyboard.type(String(rating), { delay: 40 }).catch(() => undefined);
+      await sleep(300);
+      selected = await readSelectedRating(frame);
+      if (selected === rating) {
+        console.log(
+          `[maps-review] chọn ${rating}★ OK (keyboard, attempt=${attempt + 1})`,
+        );
+        return;
+      }
+    }
+
+    // D) Nếu nút Đăng đã enable sau click — coi như sao đã ăn (UI không set aria-checked)
+    const postEnabled = await frame
+      .evaluate(() => {
+        const b = document.querySelector(
+          'button[jsname="IJM3w"]',
+        ) as HTMLButtonElement | null;
+        return (
+          !!b &&
+          !b.disabled &&
+          b.getAttribute("aria-disabled") !== "true"
+        );
+      })
+      .catch(() => false);
+    if (postEnabled && dom.ok) {
+      console.log(
+        `[maps-review] chọn ${rating}★ — Đăng đã enable (via=${dom.via}, không đọc được aria-checked)`,
+      );
+      return;
+    }
+
+    await sleep(400 + attempt * 150);
   }
+
+  // Dump nhẹ để debug
+  const dump = await frame
+    .evaluate(() => {
+      const groups = document.querySelectorAll('div[role="radiogroup"]').length;
+      const ratings = Array.from(document.querySelectorAll("[data-rating]")).map(
+        (el) => el.getAttribute("data-rating"),
+      );
+      const radios = document.querySelectorAll('[role="radio"]').length;
+      return { groups, ratings: ratings.slice(0, 8), radios };
+    })
+    .catch(() => null);
+  console.warn(`[maps-review] selectStar fail dump=`, dump, `lastVia=${lastVia}`);
+  throw new Error(`Không chọn được ${rating} sao`);
 }
 
 async function enterReview(frame: Frame, text: string, human: HumanCursor) {
@@ -353,19 +638,46 @@ async function enterReview(frame: Frame, text: string, human: HumanCursor) {
     'textarea[placeholder*="trải nghiệm" i]',
     'textarea[placeholder*="Mô tả" i]',
     'textarea[placeholder*="experience" i]',
+    'textarea[placeholder*="Share" i]',
     "textarea",
+    'div[contenteditable="true"][aria-label*="đánh giá" i]',
+    'div[contenteditable="true"][aria-label*="review" i]',
+    'div[role="textbox"][contenteditable="true"]',
   ];
   const body = text.trim();
   if (!body) throw new Error("Nội dung đánh giá trống");
   const minFilled = Math.min(8, body.length);
 
+  // Chờ ô nhập xuất hiện
+  const waitStart = Date.now();
+  while (Date.now() - waitStart < 10_000) {
+    const has = await frame
+      .evaluate(
+        () =>
+          !!document.querySelector(
+            'textarea, div[contenteditable="true"], div[role="textbox"]',
+          ),
+      )
+      .catch(() => false);
+    if (has) break;
+    await sleep(300);
+  }
+
   // Đóng popover ⓘ che form trước khi thao tác
   await closeInfoPopover(frame);
+  await dismissCancelReviewPrompt(frame);
 
   const filledLen = async (sel: string) =>
     frame.evaluate((s) => {
-      const ta = document.querySelector(s) as HTMLTextAreaElement | null;
-      return (ta?.value || "").trim().length;
+      const el = document.querySelector(s) as
+        | HTMLTextAreaElement
+        | HTMLElement
+        | null;
+      if (!el) return 0;
+      if ("value" in el && typeof (el as HTMLTextAreaElement).value === "string") {
+        return ((el as HTMLTextAreaElement).value || "").trim().length;
+      }
+      return (el.textContent || "").trim().length;
     }, sel);
 
   for (const sel of selectors) {
@@ -428,18 +740,26 @@ async function enterReview(frame: Frame, text: string, human: HumanCursor) {
       return;
     }
 
-    // 4) Fallback cuối: set value trực tiếp qua native setter (React nhận input)
+    // 4) Fallback cuối: set value trực tiếp (textarea hoặc contenteditable)
     await frame
       .evaluate(
         (s, val) => {
-          const ta = document.querySelector(s) as HTMLTextAreaElement | null;
-          if (!ta) return;
-          const proto = window.HTMLTextAreaElement.prototype;
-          const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
-          if (setter) setter.call(ta, val);
-          else ta.value = val;
-          ta.dispatchEvent(new InputEvent("input", { bubbles: true, data: val }));
-          ta.dispatchEvent(new Event("change", { bubbles: true }));
+          const el = document.querySelector(s) as HTMLElement | null;
+          if (!el) return;
+          if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) {
+            const proto =
+              el instanceof HTMLTextAreaElement
+                ? window.HTMLTextAreaElement.prototype
+                : window.HTMLInputElement.prototype;
+            const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+            if (setter) setter.call(el, val);
+            else (el as HTMLTextAreaElement).value = val;
+          } else {
+            el.focus();
+            el.textContent = val;
+          }
+          el.dispatchEvent(new InputEvent("input", { bubbles: true, data: val }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
         },
         sel,
         body,
@@ -481,18 +801,15 @@ async function waitPostButtonEnabled(frame: Frame, rating: number, timeoutMs = 4
 
     attempt += 1;
     if (attempt === 6 || attempt === 12 || attempt === 20) {
-      await frame.evaluate((r) => {
+      await clickStarInDom(frame, rating).catch(() => undefined);
+      await frame.evaluate(() => {
         const ta = document.querySelector("textarea") as HTMLTextAreaElement | null;
         if (ta) {
           ta.focus();
           ta.dispatchEvent(new InputEvent("input", { bubbles: true, data: ta.value }));
           ta.dispatchEvent(new Event("change", { bubbles: true }));
         }
-        document
-          .querySelectorAll('div[role="radiogroup"]')[0]
-          ?.querySelector(`[data-rating="${r}"]`)
-          ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      }, rating);
+      }).catch(() => undefined);
     }
     await sleep(500);
   }
@@ -1061,12 +1378,35 @@ export async function postMapsReview(
   await keepFocus();
   await clickReviewButton(page, human);
   await sleep(rand(900, 1400));
-  const frame = await waitReviewFrame(page);
+  let frame = await waitReviewFrame(page);
   await keepFocus();
-  await selectStar(frame, payload.rating, human);
+
+  // Chờ form ổn định rồi chọn sao — nếu frame lệch, tìm lại
+  try {
+    await selectStar(frame, payload.rating, human);
+  } catch (e) {
+    console.warn(
+      `[maps-review] selectStar lần 1 lỗi: ${e instanceof Error ? e.message : e} — tìm lại frame`,
+    );
+    frame = await waitReviewFrame(page, 20_000);
+    await keepFocus();
+    await selectStar(frame, payload.rating, human);
+  }
   await sleep(rand(400, 900));
   await keepFocus();
-  await enterReview(frame, payload.reviewText, human);
+
+  try {
+    await enterReview(frame, payload.reviewText, human);
+  } catch (e) {
+    console.warn(
+      `[maps-review] enterReview lần 1 lỗi: ${e instanceof Error ? e.message : e} — retry`,
+    );
+    frame = await waitReviewFrame(page, 15_000);
+    await keepFocus();
+    // Đảm bảo sao còn chọn trước khi gõ
+    await selectStar(frame, payload.rating, human).catch(() => undefined);
+    await enterReview(frame, payload.reviewText, human);
+  }
   const imagePaths =
     payload.imagePaths?.filter(Boolean) ??
     (payload.imagePath ? [payload.imagePath] : []);
