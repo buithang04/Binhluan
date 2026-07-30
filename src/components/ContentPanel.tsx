@@ -1,16 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { resolveSpinTemplate } from "@/lib/spin";
 import { formatDateTimeVi } from "@/lib/format-datetime";
 import { useHydrated } from "@/lib/use-hydrated";
 import { readApiJson } from "@/lib/api-client";
 import type { ReviewSpinByStar } from "@/lib/review-content";
-import {
-  DEFAULT_STAR_SPIN_PROMPT_JSON,
-  PROMPT_VARIABLE_GROUPS,
-  validatePromptJsonText,
-} from "@/lib/prompt-template";
 
 type StarPlan = {
   projectedRating: number;
@@ -61,13 +56,6 @@ export function ContentPanel({
       ? String(initialSettings.contentWordCount)
       : "",
   );
-  const [contentPromptJson, setContentPromptJson] = useState(
-    initialSettings?.contentPromptJson?.trim() || DEFAULT_STAR_SPIN_PROMPT_JSON,
-  );
-  const promptTextareaRef = useRef<HTMLTextAreaElement>(null);
-  const [promptJsonError, setPromptJsonError] = useState("");
-  const [previewingPrompt, setPreviewingPrompt] = useState(false);
-  const [resolvedPreview, setResolvedPreview] = useState("");
 
   const [starPlan, setStarPlan] = useState<StarPlan | null>(initialStarPlan);
   const [starPlanBlockers, setStarPlanBlockers] = useState<string[]>(
@@ -138,13 +126,7 @@ export function ContentPanel({
               ? String(contentData.settings.contentWordCount)
               : "",
           );
-          if (contentData.settings.contentPromptJson?.trim()) {
-            setContentPromptJson(contentData.settings.contentPromptJson);
-          }
         }
-      }
-      if (settingsRes.ok && settingsData.settings?.contentPromptJson?.trim()) {
-        setContentPromptJson(settingsData.settings.contentPromptJson);
       }
     } catch {
       /* giữ state cũ — tránh blank khi JSON lỗi / timeout */
@@ -154,101 +136,14 @@ export function ContentPanel({
   }, [projectId]);
 
   useEffect(() => {
-    // Luôn load prompt JSON từ API (SSR có thể chưa truyền)
-    void (async () => {
-      try {
-        const res = await fetch(`/api/projects/${projectId}/content-settings`);
-        if (!res.ok) return;
-        const data = await res.json();
-        const raw = data.settings?.contentPromptJson?.trim();
-        if (raw) setContentPromptJson(raw);
-      } catch {
-        /* ignore */
-      }
-    })();
-  }, [projectId]);
-
-  useEffect(() => {
     // Đã có dữ liệu SSR (DB) — không fetch lại phân bổ sao / nội dung lúc mount
     if (hydratedFromServer) return;
     void loadAll();
   }, [hydratedFromServer, loadAll]);
 
-  function insertPromptVariable(path: string) {
-    const el = promptTextareaRef.current;
-    const token = `{{ ${path} }}`;
-    if (!el) {
-      setContentPromptJson((prev) => prev + token);
-      return;
-    }
-    const start = el.selectionStart ?? el.value.length;
-    const end = el.selectionEnd ?? start;
-    const next = el.value.slice(0, start) + token + el.value.slice(end);
-    setContentPromptJson(next);
-    requestAnimationFrame(() => {
-      el.focus();
-      const pos = start + token.length;
-      el.setSelectionRange(pos, pos);
-    });
-  }
-
-  function onPromptJsonChange(value: string) {
-    setContentPromptJson(value);
-    setResolvedPreview("");
-    if (!value.trim()) {
-      setPromptJsonError("");
-      return;
-    }
-    const check = validatePromptJsonText(value);
-    setPromptJsonError(check.ok ? "" : check.error || "JSON không hợp lệ");
-  }
-
-  async function previewResolvedPrompt() {
-    setError("");
-    setResolvedPreview("");
-    const check = validatePromptJsonText(contentPromptJson);
-    if (!check.ok) {
-      setPromptJsonError(check.error || "JSON không hợp lệ");
-      return;
-    }
-    setPreviewingPrompt(true);
-    try {
-      const res = await fetch(`/api/projects/${projectId}/content-settings/preview`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          promptJson: contentPromptJson,
-          callDeepSeek: false,
-          starLevels: starPlan
-            ? Object.entries(starPlan.countsByStar)
-                .filter(([, n]) => n > 0)
-                .map(([s]) => Number(s))
-                .filter((n) => n >= 1 && n <= 5)
-            : [5],
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setError(data.error || "Resolve prompt thất bại");
-        return;
-      }
-      setResolvedPreview(JSON.stringify(data.resolvedPayload, null, 2));
-    } catch {
-      setError("Không kết nối được máy chủ");
-    } finally {
-      setPreviewingPrompt(false);
-    }
-  }
-
   async function saveContentSettings(): Promise<boolean> {
     setError("");
     setMessage("");
-    const check = validatePromptJsonText(contentPromptJson);
-    if (!check.ok) {
-      setPromptJsonError(check.error || "JSON prompt không hợp lệ");
-      setError("Sửa JSON prompt trước khi lưu");
-      return false;
-    }
     setSavingSettings(true);
     try {
       const res = await fetch(`/api/projects/${projectId}/content-settings`, {
@@ -260,7 +155,7 @@ export function ContentPanel({
           contentExample: contentExample || null,
           contentWordCount:
             contentWordCount.trim() === "" ? null : Number(contentWordCount),
-          contentPromptJson: contentPromptJson.trim() || null,
+          contentPromptJson: null,
         }),
       });
       const data = await res.json();
@@ -268,10 +163,7 @@ export function ContentPanel({
         setError(data.error || "Lưu cấu hình thất bại");
         return false;
       }
-      if (data.settings?.contentPromptJson) {
-        setContentPromptJson(data.settings.contentPromptJson);
-      }
-      setMessage("Đã lưu cấu hình + prompt JSON");
+      setMessage("Đã lưu cấu hình (prompt DeepSeek lấy từ Admin → DeepSeek)");
       return true;
     } catch {
       setError("Không kết nối được máy chủ");
@@ -469,77 +361,16 @@ export function ContentPanel({
         </label>
       </div>
 
-      <div className="space-y-3 rounded-[var(--radius-sm)] border border-[var(--line)] bg-[var(--surface-muted)] p-3">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
-            <p className="text-sm font-medium text-[var(--ink)]">
-              Prompt DeepSeek (JSON)
-            </p>
-            <p className="mt-0.5 text-xs text-[var(--muted)]">
-              Sửa prompt + <code className="font-mono">response_format</code> (schema) trước khi
-              sinh. Dùng {"{{ $json.settings.star_levels }}"} — hệ thống gắn sẵn các mức sao cần
-              dùng (1 lần call ra đủ). Prompt cũ chỉ có{" "}
-              <code className="font-mono">stars</code> → bấm Reset mặc định.
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              className="btn btn-secondary !py-1.5 text-xs"
-              disabled={!!generatedAt}
-              onClick={() => {
-                setContentPromptJson(DEFAULT_STAR_SPIN_PROMPT_JSON);
-                setPromptJsonError("");
-                setResolvedPreview("");
-              }}
-            >
-              Reset mặc định
-            </button>
-            <button
-              type="button"
-              className="btn btn-secondary !py-1.5 text-xs"
-              disabled={previewingPrompt || !!promptJsonError}
-              onClick={() => void previewResolvedPrompt()}
-            >
-              {previewingPrompt ? "Đang resolve…" : "Xem JSON đã resolve"}
-            </button>
-          </div>
-        </div>
-
-        <div className="flex flex-wrap gap-1.5">
-          {PROMPT_VARIABLE_GROUPS.flatMap((g) =>
-            g.items.map((item) => (
-              <button
-                key={item.path}
-                type="button"
-                disabled={!!generatedAt}
-                title={item.path}
-                onClick={() => insertPromptVariable(item.path)}
-                className="rounded-md border border-[var(--line)] bg-[var(--surface)] px-2 py-0.5 font-mono text-[10px] text-[var(--ink-soft)] transition hover:border-[var(--accent)] hover:text-[var(--accent-ink)] disabled:opacity-50"
-              >
-                {item.label}
-              </button>
-            )),
-          )}
-        </div>
-
-        <textarea
-          ref={promptTextareaRef}
-          className="input min-h-[220px] font-mono text-xs leading-relaxed"
-          value={contentPromptJson}
-          onChange={(e) => onPromptJsonChange(e.target.value)}
-          disabled={!!generatedAt}
-          spellCheck={false}
-          placeholder='{ "model": "deepseek-chat", "messages": [...] }'
-        />
-        {promptJsonError && (
-          <p className="text-xs text-[var(--danger)]">{promptJsonError}</p>
-        )}
-        {resolvedPreview && (
-          <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-[var(--radius-sm)] border border-[var(--line)] bg-[var(--surface)] p-2.5 font-mono text-[11px] text-[var(--ink-soft)]">
-            {resolvedPreview}
-          </pre>
-        )}
+      <div className="rounded-[var(--radius-sm)] border border-[var(--line)] bg-[var(--surface-muted)] p-3 text-sm text-[var(--ink-soft)]">
+        <p className="font-medium text-[var(--ink)]">Prompt DeepSeek</p>
+        <p className="mt-1 text-xs text-[var(--muted)]">
+          Model + Prompt JSON + schema đầu ra cấu hình tại{" "}
+          <a href="/admin/deepseek" className="text-[var(--accent-ink)] underline">
+            Admin → DeepSeek
+          </a>
+          . Sinh nội dung gọi <strong>1 lần</strong> cho đủ các mức sao; schema ép{" "}
+          <code className="font-mono">{"{ templates: [{ stars, template }] }"}</code>.
+        </p>
       </div>
 
       <div className="flex flex-wrap gap-2">

@@ -282,10 +282,12 @@ export async function generateAllStarSpins(
   }
 
   const { generateWithPromptJson } = await import("@/lib/deepseek");
-  const { DEFAULT_STAR_SPIN_PROMPT_JSON } = await import("@/lib/prompt-template");
+  const { resolveEffectivePromptJson } = await import("@/lib/deepseek-settings");
 
-  const promptJson =
-    project.contentPromptJson?.trim() || DEFAULT_STAR_SPIN_PROMPT_JSON;
+  const effective = await resolveEffectivePromptJson(
+    project.contentPromptJson,
+  );
+  const promptJson = effective.promptJson;
 
   // Prompt cũ (1 sao / lần) — vẫn hỗ trợ song song để không gãy dự án đã lưu prompt legacy
   const isLegacySingle =

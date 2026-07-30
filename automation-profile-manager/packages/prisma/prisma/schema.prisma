@@ -519,3 +519,11 @@ model BusinessProduct {
   @@unique([businessId, name])
   @@index([businessId])
 }
+
+/** Cấu hình hệ thống (vd DeepSeek model + prompt JSON). */
+model SystemSetting {
+  key       String   @id
+  value     String   @db.Text
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

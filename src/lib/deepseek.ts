@@ -3,6 +3,11 @@ import {
   DEFAULT_DEEPSEEK_PROMPT_JSON,
   resolvePromptJson,
 } from "@/lib/prompt-template";
+import {
+  STAR_SPIN_RESPONSE_FORMAT,
+  STAR_SPIN_RESPONSE_FORMAT_JSON_OBJECT,
+} from "@/lib/deepseek-schema";
+import { loadDeepSeekSettings } from "@/lib/deepseek-settings";
 
 type DeepSeekPayload = {
   model?: string;
@@ -15,50 +20,62 @@ type DeepSeekPayload = {
 
 export async function callDeepSeekPayload(
   payload: DeepSeekPayload,
+  opts?: { baseUrl?: string; apiKey?: string; forceSchema?: boolean },
 ): Promise<{ text: string | null; error?: string }> {
-  const apiKey = process.env.DEEPSEEK_API_KEY;
-  const baseUrl = process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com";
+  const apiKey = opts?.apiKey || process.env.DEEPSEEK_API_KEY;
+  let baseUrl =
+    opts?.baseUrl || process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com";
 
   if (!apiKey) {
     return { text: null, error: "Thiếu DEEPSEEK_API_KEY trong .env" };
   }
 
-  const buildBody = (responseFormat: unknown | undefined) => ({
+  // Ép schema đầu ra khi sinh batch star spins
+  let responseFormat = payload.response_format;
+  if (opts?.forceSchema !== false) {
+    const rf = responseFormat as { type?: string } | undefined;
+    if (!rf || rf.type !== "json_schema") {
+      responseFormat = STAR_SPIN_RESPONSE_FORMAT;
+    }
+  }
+
+  const buildBody = (rf: unknown | undefined) => ({
     model: payload.model || "deepseek-v4-flash",
     messages: payload.messages,
     temperature: payload.temperature ?? 0.85,
     max_tokens: payload.max_tokens ?? 800,
-    ...(responseFormat != null ? { response_format: responseFormat } : {}),
+    ...(rf != null ? { response_format: rf } : {}),
   });
 
   try {
-    const attempt = async (responseFormat: unknown | undefined) => {
-      const res = await fetch(`${baseUrl}/v1/chat/completions`, {
+    const attempt = async (rf: unknown | undefined) => {
+      const res = await fetch(`${baseUrl.replace(/\/$/, "")}/v1/chat/completions`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${apiKey}`,
         },
-        body: JSON.stringify(buildBody(responseFormat)),
+        body: JSON.stringify(buildBody(rf)),
       });
       const errBody = res.ok ? "" : await res.text().catch(() => "");
       return { res, errBody };
     };
 
-    let { res, errBody } = await attempt(payload.response_format);
+    let { res, errBody } = await attempt(responseFormat);
 
-    // Một số model không hỗ trợ json_schema → fallback json_object (1 lần)
+    // Model không hỗ trợ json_schema → fallback json_object
     if (
       !res.ok &&
-      payload.response_format &&
-      typeof payload.response_format === "object" &&
-      (payload.response_format as { type?: string }).type === "json_schema" &&
-      (res.status === 400 || /response_format|json_schema|schema|invalid/i.test(errBody))
+      responseFormat &&
+      typeof responseFormat === "object" &&
+      (responseFormat as { type?: string }).type === "json_schema" &&
+      (res.status === 400 ||
+        /response_format|json_schema|schema|invalid/i.test(errBody))
     ) {
       console.warn(
         "[deepseek] json_schema không hỗ trợ — fallback response_format=json_object",
       );
-      ({ res, errBody } = await attempt({ type: "json_object" }));
+      ({ res, errBody } = await attempt(STAR_SPIN_RESPONSE_FORMAT_JSON_OBJECT));
     }
 
     if (!res.ok) {
@@ -74,7 +91,10 @@ export async function callDeepSeekPayload(
     const text = data.choices?.[0]?.message?.content?.trim() || null;
     return { text };
   } catch (e) {
-    return { text: null, error: e instanceof Error ? e.message : "DeepSeek request failed" };
+    return {
+      text: null,
+      error: e instanceof Error ? e.message : "DeepSeek request failed",
+    };
   }
 }
 
@@ -87,13 +107,27 @@ export async function generateWithPromptJson(
     stars?: number;
     starLevels?: number[];
   },
-): Promise<{ text: string | null; resolvedPayload?: Record<string, unknown>; error?: string }> {
-  const raw = promptJson?.trim() || DEFAULT_DEEPSEEK_PROMPT_JSON;
+): Promise<{
+  text: string | null;
+  resolvedPayload?: Record<string, unknown>;
+  error?: string;
+}> {
+  const settings = await loadDeepSeekSettings();
+  const raw = promptJson?.trim() || settings.promptJson || DEFAULT_DEEPSEEK_PROMPT_JSON;
   const ctx = buildPromptContext(project, spinTextOrOpts);
   const { payload, error } = resolvePromptJson(raw, ctx);
-  if (error || !payload) return { text: null, error: error || "Không resolve được prompt" };
+  if (error || !payload) {
+    return { text: null, error: error || "Không resolve được prompt" };
+  }
 
-  const result = await callDeepSeekPayload(payload as DeepSeekPayload);
+  // Ép model + schema từ cấu hình hệ thống
+  payload.model = settings.model;
+  payload.response_format = STAR_SPIN_RESPONSE_FORMAT;
+
+  const result = await callDeepSeekPayload(payload as DeepSeekPayload, {
+    baseUrl: settings.baseUrl,
+    forceSchema: true,
+  });
   return { ...result, resolvedPayload: payload };
 }
 
@@ -144,7 +178,16 @@ ${baseText}`,
     },
   ];
 
-  const result = await callDeepSeekPayload({ messages, temperature: 0.8, max_tokens: 800 });
+  const settings = await loadDeepSeekSettings();
+  const result = await callDeepSeekPayload(
+    {
+      model: settings.model,
+      messages,
+      temperature: 0.8,
+      max_tokens: 800,
+    },
+    { baseUrl: settings.baseUrl, forceSchema: false },
+  );
   return result.text;
 }
 
