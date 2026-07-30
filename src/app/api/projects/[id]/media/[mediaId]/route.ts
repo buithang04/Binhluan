@@ -5,11 +5,12 @@ import path from "path";
 import { randomUUID } from "crypto";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { MAPS_IMAGE_HINT, MAPS_IMAGE_MAX_BYTES } from "@/lib/maps-image";
+import { normalizeMapsImageBuffer } from "@/lib/normalize-maps-image";
 
 type Ctx = { params: Promise<{ id: string; mediaId: string }> };
 
 const ALLOWED = new Set(["image/jpeg", "image/png", "image/webp"]);
-const MAX_BYTES = 5 * 1024 * 1024;
 
 function uploadRoot() {
   return process.env.UPLOAD_DIR || path.join(process.cwd(), "uploads");
@@ -71,18 +72,29 @@ export async function PATCH(req: Request, ctx: Ctx) {
         { status: 400 },
       );
     }
-    if (file.size > MAX_BYTES) {
-      return NextResponse.json({ error: "Ảnh tối đa 5MB" }, { status: 400 });
+    if (file.size > MAPS_IMAGE_MAX_BYTES * 4) {
+      return NextResponse.json(
+        {
+          error: `Ảnh gốc quá lớn (>${(MAPS_IMAGE_MAX_BYTES * 4) / 1024 / 1024}MB). ${MAPS_IMAGE_HINT}`,
+        },
+        { status: 400 },
+      );
     }
 
-    const ext =
-      file.type === "image/png" ? "png" : file.type === "image/webp" ? "webp" : "jpg";
-    const fileName = `${randomUUID()}.${ext}`;
+    const raw = Buffer.from(await file.arrayBuffer());
+    let normalized;
+    try {
+      normalized = await normalizeMapsImageBuffer(raw, file.type);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Ảnh không đạt chuẩn Maps";
+      return NextResponse.json({ error: msg }, { status: 400 });
+    }
+
+    const fileName = `${randomUUID()}.${normalized.ext}`;
     const dir = path.join(uploadRoot(), id);
     await mkdir(dir, { recursive: true });
     const diskPath = path.join(dir, fileName);
-    const buffer = Buffer.from(await file.arrayBuffer());
-    await writeFile(diskPath, buffer);
+    await writeFile(diskPath, normalized.buffer);
 
     try {
       await unlink(path.join(uploadRoot(), id, media.fileName));
@@ -95,12 +107,16 @@ export async function PATCH(req: Request, ctx: Ctx) {
       data: {
         fileName,
         filePath: `/api/uploads/${id}/${fileName}`,
-        mimeType: file.type,
-        sizeBytes: file.size,
+        mimeType: normalized.mimeType,
+        sizeBytes: normalized.sizeBytes,
         ...(hasCaption ? { caption: caption ?? null } : {}),
       },
     });
-    return NextResponse.json({ media: updated });
+    return NextResponse.json({
+      media: updated,
+      normalized: normalized.changed,
+      mapsSize: `${normalized.width}×${normalized.height}`,
+    });
   }
 
   const body = (await req.json()) as { caption?: string | null };

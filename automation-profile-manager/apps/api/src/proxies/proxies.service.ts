@@ -348,7 +348,11 @@ export class ProxiesService {
     const errors: string[] = [];
 
     while (page <= 100) {
-      const url = new URL("https://proxy.webshare.io/api/v2/proxy/list/");
+      const base =
+        (process.env.WEBSHARE_API_BASE || "").trim() ||
+        "https://proxy.webshare.io/api/v2/proxy/list/";
+      const url = new URL(base.endsWith("/") ? base : `${base}/`);
+      // Nếu base đã có query sẵn thì vẫn set mode/page
       url.searchParams.set("mode", mode);
       url.searchParams.set("page", String(page));
       url.searchParams.set("page_size", "100");

@@ -195,6 +195,10 @@ export function ProxiesPage() {
         lastFinishedAt: string | null;
         lastError: string | null;
         lastResult: { imported: number; updated: number; skipped: number } | null;
+        hasApiToken?: boolean;
+        apiTokenHint?: string | null;
+        apiBaseUrl?: string;
+        mode?: string;
       }>("/proxies/sync/status"),
     refetchInterval: 5_000,
     refetchIntervalInBackground: true,
@@ -292,6 +296,36 @@ export function ProxiesPage() {
           }
         />
       )}
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 16 }}
+        message="Webshare API"
+        description={
+          <div style={{ fontSize: 13, lineHeight: 1.6 }}>
+            <div>
+              <b>Endpoint:</b>{" "}
+              <Typography.Text code copyable style={{ fontSize: 12 }}>
+                {syncStatus?.apiBaseUrl ||
+                  "https://proxy.webshare.io/api/v2/proxy/list/"}
+              </Typography.Text>
+            </div>
+            <div>
+              <b>Token (.env):</b>{" "}
+              {syncStatus?.hasApiToken
+                ? `đã cấu hình ${syncStatus.apiTokenHint || ""}`
+                : "chưa có — thêm WEBSHARE_API_TOKEN vào apps/api/.env"}
+            </div>
+            <div style={{ color: "#666", marginTop: 4 }}>
+              Đổi token/URL cố định trong{" "}
+              <code>automation-profile-manager/apps/api/.env</code> (
+              <code>WEBSHARE_API_TOKEN</code>, <code>WEBSHARE_API_BASE</code>) rồi{" "}
+              <code>pm2 restart binhluan --update-env</code>. Sync tay: nút Sync
+              Webshare (có ô dán token tạm).
+            </div>
+          </div>
+        }
+      />
       <div
         style={{
           display: "flex",

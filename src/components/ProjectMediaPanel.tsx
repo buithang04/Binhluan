@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MediaEditModal } from "@/components/MediaEditModal";
 import { MAX_PROJECT_MEDIA } from "@/lib/limits";
+import { MAPS_IMAGE_HINT, prepareMapsImageFile } from "@/lib/maps-image";
 
 export type MediaItem = {
   id: string;
@@ -90,7 +91,14 @@ export function ProjectMediaPanel({
     setUploading(true);
     setError("");
     try {
-      for (const file of batch) {
+      for (const raw of batch) {
+        let file: File;
+        try {
+          file = await prepareMapsImageFile(raw);
+        } catch (e) {
+          setError(e instanceof Error ? e.message : MAPS_IMAGE_HINT);
+          break;
+        }
         const form = new FormData();
         form.append("file", file);
         const res = await fetch(`/api/projects/${projectId}/media`, {
@@ -125,8 +133,15 @@ export function ProjectMediaPanel({
 
       let res: Response;
       if (hasImageChange && editedFile) {
+        let file = editedFile;
+        try {
+          file = await prepareMapsImageFile(editedFile);
+        } catch (e) {
+          setError(e instanceof Error ? e.message : MAPS_IMAGE_HINT);
+          return;
+        }
         const form = new FormData();
-        form.append("file", editedFile);
+        form.append("file", file);
         form.append("caption", editCaption);
         res = await fetch(`/api/projects/${projectId}/media/${editing.id}`, {
           method: "PATCH",
@@ -270,7 +285,7 @@ export function ProjectMediaPanel({
         {open && (
           <div className="space-y-3 p-4 sm:p-5">
             <p className="text-xs text-[var(--muted)]">
-              JPG / PNG / WebP · tối đa 5MB/ảnh · kéo thả để thêm
+              JPG / PNG / WebP · chuẩn Maps (≥250px, ≤5MB) · kéo thả để thêm
             </p>
 
             {error && !editing && (

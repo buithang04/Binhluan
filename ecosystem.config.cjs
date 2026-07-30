@@ -17,11 +17,14 @@ module.exports = {
       env: {
         NODE_ENV: "development",
         WEB_MODE: "dev",
+        CHROME_DEBUG: "1",
       },
       min_uptime: 30_000,
       max_restarts: 15,
       restart_delay: 10_000,
       kill_timeout: 20_000,
+      // treekill giữ mặc định (true): tắt nest/next con khi restart.
+      // Chrome Maps không nằm trong tree (Start-Process độc lập) nên vẫn sống.
       autorestart: true,
     },
   ],

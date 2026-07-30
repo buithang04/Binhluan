@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { MAX_PROJECT_MEDIA } from "@/lib/limits";
+import { MAPS_IMAGE_HINT, prepareMapsImageFile } from "@/lib/maps-image";
 import { planReviewStars } from "@/lib/review-planner";
 import {
   vnMinCampaignStartDate,
@@ -399,9 +400,16 @@ export function ProjectForm({
       setUploading(true);
       setError("");
     }
-    const form = new FormData();
-    form.append("file", file);
     try {
+      let prepared: File;
+      try {
+        prepared = await prepareMapsImageFile(file);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : MAPS_IMAGE_HINT);
+        return false;
+      }
+      const form = new FormData();
+      form.append("file", prepared);
       const res = await fetch(`/api/projects/${projectId}/media`, {
         method: "POST",
         body: form,
@@ -852,7 +860,7 @@ export function ProjectForm({
                   Thư viện ảnh
                 </h2>
                 <p className="mt-1 text-xs text-[var(--muted)]">
-                  JPG / PNG / WebP · tối đa 5MB/ảnh · {media.length}/{MAX_PROJECT_MEDIA}
+                  JPG / PNG / WebP · chuẩn Maps (≥250px, ≤5MB) · {media.length}/{MAX_PROJECT_MEDIA}
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">

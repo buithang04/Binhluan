@@ -57,6 +57,11 @@ class BrowserPool {
     }));
   }
 
+  /** Mọi session đang giữ (kể cả flags MAPS/LOGIN). */
+  allSessions(): LiveBrowserSession[] {
+    return [...this.byProfile.values()];
+  }
+
   async register(session: LiveBrowserSession) {
     const existing = this.byProfile.get(session.profileId);
     // Đã có session CDP sống khác — không thay (tránh soft-reclaim/focus cướp LOGIN)
@@ -100,9 +105,14 @@ class BrowserPool {
    * Gỡ khỏi pool.
    * closeBrowser=false: chỉ gỡ map.
    * closeBrowser=true (mặc định keep-alive): chỉ disconnect CDP — KHÔNG tắt Chrome.
-   * kill=true: tắt hẳn Chrome (đổi proxy / reset profile).
+   * kill=true: tắt hẳn Chrome.
+   * forceClose=true: đóng cửa sổ qua CDP (dùng khi ĐỔI PROXY có chủ đích — cookie giữ trong profile).
    */
-  async release(profileId: string, closeBrowser = true, opts?: { kill?: boolean }) {
+  async release(
+    profileId: string,
+    closeBrowser = true,
+    opts?: { kill?: boolean; forceClose?: boolean },
+  ) {
     const cur = this.byProfile.get(profileId);
     if (!cur) return;
     this.byProfile.delete(profileId);
@@ -110,12 +120,47 @@ class BrowserPool {
     if (!closeBrowser) return;
     if (!cur.browser.connected) return;
 
-    if (opts?.kill) {
+    if (opts?.forceClose || (opts?.kill && process.env.ALLOW_CHROME_KILL === "1")) {
+      // Đang MAPS: cấm kill/OS terminate (tránh "vào Maps rồi tắt").
+      // forceClose vẫn ĐƯỢC phép — dùng có chủ đích khi đổi proxy trước khi vào Maps.
+      if (cur.mapsReviewInProgress && !opts?.forceClose) {
+        console.warn(
+          `[browser-pool] chặn kill #${cur.browserIndex} — đang MAPS_REVIEW`,
+        );
+        try {
+          cur.browser.disconnect();
+        } catch {
+          /* ignore */
+        }
+        return;
+      }
+      if (cur.mapsReviewInProgress && opts?.forceClose) {
+        console.warn(
+          `[browser-pool] forceClose #${cur.browserIndex} dù đang MAPS_REVIEW (đổi-proxy có chủ đích)`,
+        );
+      }
+      console.log(
+        `[browser-pool] đóng Chrome #${cur.browserIndex} (${opts?.forceClose ? "đổi-proxy" : "kill"})`,
+      );
+      try {
+        // Dynamic import tránh circular; chỉ log
+        const { logChromeCloseIntent } = await import("./chrome-debug-guard.js");
+        logChromeCloseIntent(
+          opts?.forceClose ? "forceClose" : "killChrome",
+          `#${cur.browserIndex} profile=${profileId}`,
+        );
+      } catch {
+        /* ignore */
+      }
       await cur.browser.close().catch(() => undefined);
       return;
     }
-
-    // Keep-alive: ngắt CDP thôi — Chrome cửa sổ vẫn mở
+    if (opts?.kill) {
+      console.warn(
+        `[browser-pool] bỏ qua kill #${cur.browserIndex} — chỉ disconnect CDP (never-kill)`,
+      );
+    }
+    // Keep-alive / never-kill: ngắt CDP thôi — Chrome cửa sổ vẫn mở
     try {
       cur.browser.disconnect();
     } catch {

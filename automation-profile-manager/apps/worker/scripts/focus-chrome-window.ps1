@@ -109,6 +109,8 @@ if (-not $Force -and $foreNow -eq $script:best) {
 if ([WinFocusHelper]::IsIconic($script:best)) {
   [void][WinFocusHelper]::ShowWindow($script:best, 9) # SW_RESTORE
 }
+# Luôn SHOW — Chrome hay bị IsWindowVisible=false dù vẫn còn hwnd (nhìn như "đóng")
+[void][WinFocusHelper]::ShowWindow($script:best, 9) # SW_RESTORE
 [void][WinFocusHelper]::ShowWindow($script:best, 5) # SW_SHOW
 if (-not $NoMaximize) {
   [void][WinFocusHelper]::ShowWindow($script:best, 3) # SW_MAXIMIZE

@@ -143,17 +143,33 @@ export class HumanCursor {
 
   /** Di chuyển / scroll / nghỉ nhẹ trước khi vào form (giảm tín hiệu bot). */
   async warmUp() {
-    const w = await this.page.evaluate(() => ({
-      x: window.innerWidth || 1200,
-      y: window.innerHeight || 800,
-    }));
-    await this.moveTo(rand(120, Math.max(200, w.x * 0.7)), rand(100, Math.max(180, w.y * 0.5)));
-    await this.pause(200, 500);
-    await this.page.evaluate(() => {
-      window.scrollBy(0, Math.floor(40 + Math.random() * 180));
-    });
-    await this.pause(300, 900);
-    await this.moveTo(rand(150, Math.max(220, w.x * 0.55)), rand(140, Math.max(220, w.y * 0.45)));
-    await this.pause(200, 600);
+    try {
+      const w = await Promise.race([
+        this.page.evaluate(() => ({
+          x: window.innerWidth || 1200,
+          y: window.innerHeight || 800,
+        })),
+        new Promise<{ x: number; y: number }>((resolve) =>
+          setTimeout(() => resolve({ x: 1200, y: 800 }), 5_000),
+        ),
+      ]);
+      await Promise.race([
+        this.moveTo(
+          rand(120, Math.max(200, w.x * 0.7)),
+          rand(100, Math.max(180, w.y * 0.5)),
+        ),
+        sleep(8_000),
+      ]);
+      await this.pause(150, 350);
+      await Promise.race([
+        this.page.evaluate(() => {
+          window.scrollBy(0, Math.floor(40 + Math.random() * 120));
+        }),
+        sleep(3_000),
+      ]);
+      await this.pause(200, 450);
+    } catch {
+      /* warmUp best-effort — không được chặn cả job Maps */
+    }
   }
 }

@@ -59,9 +59,16 @@ export class ProxiesSyncService implements OnModuleInit, OnModuleDestroy {
     this.timer = null;
   }
 
-  getStatus(): WebshareSyncState {
+  getStatus(): WebshareSyncState & {
+    hasApiToken: boolean;
+    apiTokenHint: string | null;
+    apiBaseUrl: string;
+  } {
+    const token = (process.env.WEBSHARE_API_TOKEN || "").trim();
+    const hint =
+      token.length >= 4 ? `…${token.slice(-4)}` : token ? "…***" : null;
     return {
-      enabled: this.isEnabled() && !!process.env.WEBSHARE_API_TOKEN?.trim(),
+      enabled: this.isEnabled() && !!token,
       intervalSec: this.intervalSec(),
       mode: this.mode(),
       running: this.running,
@@ -70,6 +77,11 @@ export class ProxiesSyncService implements OnModuleInit, OnModuleDestroy {
       lastFinishedAt: this.lastFinishedAt?.toISOString() ?? null,
       lastError: this.lastError,
       lastResult: this.lastResult,
+      hasApiToken: Boolean(token),
+      apiTokenHint: hint,
+      apiBaseUrl:
+        (process.env.WEBSHARE_API_BASE || "").trim() ||
+        "https://proxy.webshare.io/api/v2/proxy/list/",
     };
   }
 

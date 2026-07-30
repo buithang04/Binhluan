@@ -9,6 +9,7 @@ import {
   getEditedImageBlob,
   guessMimeType,
 } from "@/lib/crop-image";
+import { MAPS_IMAGE_HINT, prepareMapsImageFile } from "@/lib/maps-image";
 
 type AspectOption = { id: string; label: string; value?: number };
 
@@ -194,9 +195,11 @@ export function MediaEditModal({
         setError("Không xử lý được ảnh");
         return;
       }
-      onSave(blobToFile(blob, editedFileName(originalFileName)));
-    } catch {
-      setError("Không xử lý được ảnh");
+      const raw = blobToFile(blob, editedFileName(originalFileName));
+      const prepared = await prepareMapsImageFile(raw);
+      onSave(prepared);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : MAPS_IMAGE_HINT);
     } finally {
       setProcessing(false);
     }

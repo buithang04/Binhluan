@@ -19,6 +19,7 @@
     "@auth/prisma-adapter": "^2.11.2",
     "@prisma/client": "^6.19.3",
     "bcryptjs": "^3.0.3",
+    "image-size": "^2.0.2",
     "next": "15.5.20",
     "next-auth": "^4.24.14",
     "prisma": "^6.19.3",
@@ -27,6 +28,7 @@
     "react-dom": "19.1.0",
     "react-easy-crop": "^6.2.2",
     "server-only": "^0.0.1",
+    "sharp": "^0.35.3",
     "xlsx": "^0.18.5",
     "zod": "^4.4.3"
   },
@@ -34,6 +36,7 @@
     "@eslint/eslintrc": "^3",
     "@tailwindcss/postcss": "^4",
     "@types/bcryptjs": "^2.4.6",
+    "@types/image-size": "^0.7.0",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",

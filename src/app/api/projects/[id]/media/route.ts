@@ -6,11 +6,12 @@ import { randomUUID } from "crypto";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { MAX_PROJECT_MEDIA } from "@/lib/limits";
+import { MAPS_IMAGE_HINT, MAPS_IMAGE_MAX_BYTES } from "@/lib/maps-image";
+import { normalizeMapsImageBuffer } from "@/lib/normalize-maps-image";
 
 type Ctx = { params: Promise<{ id: string }> };
 
 const ALLOWED = new Set(["image/jpeg", "image/png", "image/webp"]);
-const MAX_BYTES = 5 * 1024 * 1024;
 
 function uploadRoot() {
   return process.env.UPLOAD_DIR || path.join(process.cwd(), "uploads");
@@ -55,18 +56,28 @@ export async function POST(req: Request, ctx: Ctx) {
       { status: 400 },
     );
   }
-  if (file.size > MAX_BYTES) {
-    return NextResponse.json({ error: "Ảnh tối đa 5MB" }, { status: 400 });
+  // Cho phép raw lớn hơn một chút — sẽ nén xuống ≤5MB
+  if (file.size > MAPS_IMAGE_MAX_BYTES * 4) {
+    return NextResponse.json(
+      { error: `Ảnh gốc quá lớn (>${(MAPS_IMAGE_MAX_BYTES * 4) / 1024 / 1024}MB). ${MAPS_IMAGE_HINT}` },
+      { status: 400 },
+    );
   }
 
-  const ext =
-    file.type === "image/png" ? "png" : file.type === "image/webp" ? "webp" : "jpg";
-  const fileName = `${randomUUID()}.${ext}`;
+  const raw = Buffer.from(await file.arrayBuffer());
+  let normalized;
+  try {
+    normalized = await normalizeMapsImageBuffer(raw, file.type);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Ảnh không đạt chuẩn Maps";
+    return NextResponse.json({ error: msg }, { status: 400 });
+  }
+
+  const fileName = `${randomUUID()}.${normalized.ext}`;
   const dir = path.join(uploadRoot(), id);
   await mkdir(dir, { recursive: true });
   const diskPath = path.join(dir, fileName);
-  const buffer = Buffer.from(await file.arrayBuffer());
-  await writeFile(diskPath, buffer);
+  await writeFile(diskPath, normalized.buffer);
 
   const publicPath = `/api/uploads/${id}/${fileName}`;
   const media = await prisma.mediaAsset.create({
@@ -75,10 +86,17 @@ export async function POST(req: Request, ctx: Ctx) {
       fileName,
       filePath: publicPath,
       caption,
-      mimeType: file.type,
-      sizeBytes: file.size,
+      mimeType: normalized.mimeType,
+      sizeBytes: normalized.sizeBytes,
     },
   });
 
-  return NextResponse.json({ media }, { status: 201 });
+  return NextResponse.json(
+    {
+      media,
+      normalized: normalized.changed,
+      mapsSize: `${normalized.width}×${normalized.height}`,
+    },
+    { status: 201 },
+  );
 }
