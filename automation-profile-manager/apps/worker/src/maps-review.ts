@@ -767,7 +767,89 @@ async function clickStarInDom(
   const rating = Math.min(5, Math.max(1, Math.round(value)));
   const viLabels = VI_STAR_ARIA[rating] || [`${rating} sao`];
 
-  // Chuỗi pointer/mouse đầy đủ (jsaction Maps cần pointerdown→click, không chỉ .click())
+  // 0) Click Puppeteer thật trên selector Maps VI (.s2xyy / aria-label) — ổn định hơn dispatchEvent
+  const exactSels = [
+    `[role="radiogroup"][aria-label*="Xếp hạng" i] div.s2xyy[role="radio"][data-rating="${rating}"]`,
+    `div.lv4IMd[role="radiogroup"] div.s2xyy[role="radio"][data-rating="${rating}"]`,
+    `div.s2xyy[role="radio"][data-rating="${rating}"]`,
+    ...viLabels.map(
+      (l) =>
+        `[role="radiogroup"][aria-label*="Xếp hạng" i] [role="radio"][aria-label="${l}"]`,
+    ),
+    ...viLabels.map((l) => `div.s2xyy[role="radio"][aria-label="${l}"]`),
+    ...viLabels.map((l) => `[role="radio"][aria-label="${l}"]`),
+  ];
+  for (const sel of exactSels) {
+    try {
+      const handle = await frame.$(sel);
+      if (!handle) continue;
+      const box = await handle.boundingBox();
+      if (!box || box.width < 4 || box.height < 4) continue;
+      await handle.evaluate((el) => {
+        const h = el as HTMLElement;
+        h.scrollIntoView({ block: "center", inline: "nearest" });
+        try {
+          h.focus?.();
+        } catch {
+          /* ignore */
+        }
+        for (const type of [
+          "pointerover",
+          "mouseover",
+          "pointerdown",
+          "mousedown",
+          "pointerup",
+          "mouseup",
+          "click",
+        ] as const) {
+          h.dispatchEvent(
+            new MouseEvent(type, { bubbles: true, cancelable: true, view: window }),
+          );
+        }
+        h.click();
+      });
+      await sleep(500);
+      let selected = await readSelectedRating(frame);
+      if (selected === rating) {
+        return { ok: true, via: "s2xyy-exact", selected, detail: sel.slice(0, 70) };
+      }
+      // Click chuột CDP theo box
+      await handle.click({ delay: 70 }).catch(() => undefined);
+      await sleep(600);
+      selected = await readSelectedRating(frame);
+      if (selected === rating) {
+        return { ok: true, via: "s2xyy-mouse", selected, detail: sel.slice(0, 70) };
+      }
+      // Đọc radiogroup data-rating (Maps VI hay set ở đây)
+      const groupVal = await frame
+        .evaluate(() => {
+          const g =
+            document.querySelector(
+              '[role="radiogroup"][aria-label*="Xếp hạng" i], div.lv4IMd[role="radiogroup"]',
+            ) || document.querySelector('[role="radiogroup"]');
+          return g ? Number(g.getAttribute("data-rating") || 0) : 0;
+        })
+        .catch(() => 0);
+      if (groupVal === rating) {
+        return {
+          ok: true,
+          via: "s2xyy-group",
+          selected: groupVal,
+          detail: sel.slice(0, 70),
+        };
+      }
+      return {
+        ok: true,
+        via: "s2xyy-clicked",
+        selected,
+        detail: sel.slice(0, 70),
+      };
+    } catch {
+      /* next */
+    }
+  }
+
+  // 1) Fallback evaluate + fire()
   return frame.evaluate(
     (want, labels) => {
       const fire = (el: Element) => {
@@ -781,8 +863,6 @@ async function clickStarInDom(
         for (const type of [
           "pointerover",
           "mouseover",
-          "pointerenter",
-          "mouseenter",
           "pointerdown",
           "mousedown",
           "pointerup",
@@ -804,9 +884,7 @@ async function clickStarInDom(
         (
           (el.getAttribute("aria-label") || "") +
           " " +
-          (el.getAttribute("title") || "") +
-          " " +
-          (el.getAttribute("data-tooltip") || "")
+          (el.getAttribute("title") || "")
         ).trim();
 
       const matchRatingLabel = (label: string, n: number) => {
@@ -826,11 +904,7 @@ async function clickStarInDom(
           5: ["nam sao", "five star", "5 sao", "5 star"],
         };
         if ((words[n] || []).some((w) => t === w || t.startsWith(w + " "))) return true;
-        return (
-          new RegExp(`\\b${n}\\s*(sao|stars?)\\b`, "i").test(raw) ||
-          new RegExp(`\\b${n}\\s*tren\\s*5\\b`, "i").test(t) ||
-          new RegExp(`\\b${n}\\s*out\\s*of\\s*5\\b`, "i").test(t)
-        );
+        return new RegExp(`\\b${n}\\s*(sao|stars?)\\b`, "i").test(raw);
       };
 
       const readSelected = (): number | null => {
@@ -840,129 +914,45 @@ async function clickStarInDom(
           ),
         );
         for (const g of groups) {
-          const v = Number(
-            g.getAttribute("data-rating") ||
-              g.getAttribute("data-value") ||
-              g.getAttribute("aria-valuenow") ||
-              0,
-          );
+          const v = Number(g.getAttribute("data-rating") || 0);
           if (v >= 1 && v <= 5) return v;
         }
         const checked = document.querySelector(
-          '[role="radio"][aria-checked="true"], [data-rating][aria-checked="true"], .s2xyy[aria-checked="true"]',
+          '[role="radio"][aria-checked="true"], .s2xyy[aria-checked="true"]',
         ) as HTMLElement | null;
         if (checked) {
           const d = Number(checked.getAttribute("data-rating"));
           if (d >= 1 && d <= 5) return d;
-          const p = Number(checked.getAttribute("aria-posinset"));
-          if (p >= 1 && p <= 5) return p;
           for (let n = 5; n >= 1; n--) {
             if (matchRatingLabel(labelOf(checked), n)) return n;
           }
         }
-        const filled = Array.from(
-          document.querySelectorAll(
-            '[data-rating].selected, [data-rating][aria-checked="true"], .s2xyy[aria-checked="true"]',
-          ),
-        ) as HTMLElement[];
-        let max = 0;
-        for (const el of filled) {
-          const r = Number(el.getAttribute("data-rating"));
-          if (r > max) max = r;
-        }
-        return max > 0 ? max : null;
+        return null;
       };
 
       const group =
         document.querySelector('[role="radiogroup"][aria-label*="Xếp hạng" i]') ||
-        document.querySelector('[role="radiogroup"][aria-label*="star" i]') ||
         document.querySelector('div.lv4IMd[role="radiogroup"]') ||
         document.querySelector('[role="radiogroup"]');
-      const roots: ParentNode[] = [
-        ...(group ? [group] : []),
-        ...Array.from(document.querySelectorAll('div[role="radiogroup"]')),
-        ...Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"]')),
-        document.body,
-      ].filter(Boolean) as ParentNode[];
+      const scope = group || document;
 
-      for (const root of roots) {
-        // 1) VI aria-label chính xác (Một/Hai/…/Năm sao)
-        for (const L of labels as string[]) {
-          const el = root.querySelector(
-            `div.s2xyy[role="radio"][aria-label="${L}"], [role="radio"][aria-label="${L}"], [aria-label="${L}"]`,
-          ) as HTMLElement | null;
-          if (el) {
-            fire(el);
-            return {
-              ok: true,
-              via: "aria-vi",
-              selected: readSelected(),
-              detail: L,
-            };
-          }
-        }
-
-        // 2) data-rating / .s2xyy
-        const byData = root.querySelector(
-          `div.s2xyy[role="radio"][data-rating="${want}"], [role="radio"][data-rating="${want}"], [data-rating="${want}"], [data-value="${want}"]`,
-        ) as HTMLElement | null;
-        if (byData && byData.getAttribute("role") !== "radiogroup") {
-          fire(byData);
-          return { ok: true, via: "data-rating", selected: readSelected() };
-        }
-
-        // 3) match label fuzzy trong radiogroup
-        const labeled = Array.from(
-          root.querySelectorAll(
-            "[aria-label], [title], button, [role='radio'], div.s2xyy",
-          ),
-        ).find((el) => matchRatingLabel(labelOf(el), want)) as HTMLElement | undefined;
-        if (labeled) {
-          fire(labeled);
-          return { ok: true, via: "aria-label", selected: readSelected() };
-        }
-
-        // 4) aria-posinset
-        const byPos = root.querySelector(
-          `[role="radio"][aria-posinset="${want}"], [aria-posinset="${want}"]`,
-        ) as HTMLElement | null;
-        if (byPos) {
-          fire(byPos);
-          return { ok: true, via: "aria-posinset", selected: readSelected() };
-        }
-
-        // 5) đúng 5 .s2xyy → index
-        const clickables = Array.from(
-          root.querySelectorAll(
-            'div.s2xyy[role="radio"], [role="radio"], div.s2xyy, [data-rating]',
-          ),
-        ).filter((el) => {
-          if (el.getAttribute("data-rating") === "0" && el.getAttribute("role") === "radiogroup") {
-            return false;
-          }
-          const b = (el as HTMLElement).getBoundingClientRect();
-          return b.width >= 8 && b.height >= 8 && b.bottom > 0 && b.right > 0;
-        }) as HTMLElement[];
-        const stars = clickables.length >= 5 ? clickables.slice(0, 5) : clickables;
-        if (stars.length >= 3) {
-          const target = stars[want - 1] || stars[stars.length - 1];
-          if (target) {
-            fire(target);
-            return {
-              ok: true,
-              via: `index:${stars.length}`,
-              selected: readSelected(),
-            };
-          }
+      for (const L of labels as string[]) {
+        const el = scope.querySelector(
+          `div.s2xyy[role="radio"][aria-label="${L}"], [role="radio"][aria-label="${L}"]`,
+        );
+        if (el) {
+          fire(el);
+          return { ok: true, via: "aria-vi", selected: readSelected(), detail: L };
         }
       }
-
-      return {
-        ok: false,
-        via: "none",
-        selected: null,
-        detail: `bodyLen=${(document.body?.innerText || "").length}`,
-      };
+      const byData = scope.querySelector(
+        `div.s2xyy[role="radio"][data-rating="${want}"], [role="radio"][data-rating="${want}"]`,
+      );
+      if (byData) {
+        fire(byData);
+        return { ok: true, via: "data-rating", selected: readSelected() };
+      }
+      return { ok: false, via: "none", selected: null as number | null };
     },
     rating,
     viLabels,
@@ -1082,9 +1072,9 @@ async function selectStar(page: Page, value: number, _human: HumanCursor) {
       lastDetail = dom.detail || "";
       await sleep(rand(350, 650));
 
-      // Poll ngắn — radiogroup data-rating đổi 0→N sau click
+      // Poll — radiogroup data-rating đổi 0→N sau click (Maps hơi chậm)
       selected =
-        (await waitSelectedRating(frame, rating, 1200)) ??
+        (await waitSelectedRating(frame, rating, 2200)) ??
         (await readSelectedRating(frame)) ??
         dom.selected;
       if (selected === rating) {
@@ -1118,23 +1108,11 @@ async function selectStar(page: Page, value: number, _human: HumanCursor) {
         return;
       }
 
-      // Click chắc (aria-vi / data-rating / …): tin sau 1–2 lần — không chờ 3 vòng
+      // KHÔNG trust sớm khi selected/group còn null — lần trước tin ảo → Đăng xám
       if (dom.ok && CONFIDENT_STAR_VIA.test(dom.via)) {
         confidentHits += 1;
-        if (confidentHits >= 1 && /aria-vi|data-rating/i.test(dom.via)) {
-          console.log(
-            `[maps-review] chọn ${rating}★ OK trust-via=${dom.via} (hits=${confidentHits}, selected=${selected}, group=${groupVal})`,
-          );
-          return;
-        }
-        if (confidentHits >= 2) {
-          console.log(
-            `[maps-review] chọn ${rating}★ OK trust-via=${dom.via} (hits=${confidentHits}, selected=${selected})`,
-          );
-          return;
-        }
         console.warn(
-          `[maps-review] click ${dom.via} selected=${selected} group=${groupVal} — hit ${confidentHits}/2`,
+          `[maps-review] click ${dom.via} nhưng selected=${selected} group=${groupVal} ≠ ${rating} — thử lại (hit ${confidentHits})`,
         );
       }
 
@@ -1167,18 +1145,28 @@ async function selectStar(page: Page, value: number, _human: HumanCursor) {
               box.y + box.height / 2,
               { delay: 70 },
             );
-            await sleep(rand(350, 550));
-            selected = await readSelectedRating(frame);
+            await sleep(rand(450, 700));
+            selected =
+              (await waitSelectedRating(frame, rating, 1500)) ??
+              (await readSelectedRating(frame));
             if (selected === rating) {
               console.log(
                 `[maps-review] chọn ${rating}★ OK (mouse, attempt=${attempt + 1})`,
               );
               return;
             }
-            confidentHits += 1;
-            if (confidentHits >= 2) {
+            const g2 = await frame
+              .evaluate(() => {
+                const g =
+                  document.querySelector(
+                    '[role="radiogroup"][aria-label*="Xếp hạng" i], div.lv4IMd[role="radiogroup"]',
+                  ) || document.querySelector('[role="radiogroup"]');
+                return g ? Number(g.getAttribute("data-rating") || 0) : 0;
+              })
+              .catch(() => 0);
+            if (g2 === rating) {
               console.log(
-                `[maps-review] chọn ${rating}★ OK trust-mouse (hits=${confidentHits})`,
+                `[maps-review] chọn ${rating}★ OK (mouse+radiogroup, attempt=${attempt + 1})`,
               );
               return;
             }
@@ -1188,7 +1176,7 @@ async function selectStar(page: Page, value: number, _human: HumanCursor) {
         /* next frame */
       }
 
-      // Đăng đã enable → sao đã ăn (một số UI enable sớm)
+      // Chỉ tin Đăng enable KHI đã đọc đúng sao
       const postEnabled = await frame
         .evaluate(() => {
           const b = document.querySelector(
@@ -1199,11 +1187,14 @@ async function selectStar(page: Page, value: number, _human: HumanCursor) {
           );
         })
         .catch(() => false);
-      if (postEnabled && (dom.ok || confidentHits >= 1)) {
-        console.log(
-          `[maps-review] chọn ${rating}★ — Đăng đã enable (via=${dom.via})`,
-        );
-        return;
+      if (postEnabled) {
+        selected = await readSelectedRating(frame);
+        if (selected === rating) {
+          console.log(
+            `[maps-review] chọn ${rating}★ — Đăng enable + selected verified`,
+          );
+          return;
+        }
       }
     }
 
@@ -1617,7 +1608,7 @@ async function scrollPostButtonIntoView(frame: Frame) {
   await sleep(200);
 }
 
-async function clickPostButton(frame: Frame, human: HumanCursor) {
+async function clickPostButton(frame: Frame, human: HumanCursor): Promise<boolean> {
   // DOM chuẩn Maps VI: button[jsname=IJM3w] > span[jsname=V67aGc] "Đăng"
   let handle =
     (await frame.$('button[jsname="IJM3w"]')) ||
@@ -1642,41 +1633,47 @@ async function clickPostButton(frame: Frame, human: HumanCursor) {
       }
     }
   }
-  if (!handle) throw new Error("Không tìm thấy nút Đăng (jsname=IJM3w)");
+  // Không throw — sau Đăng thành công nút biến mất (form đóng)
+  if (!handle) return false;
 
-  await scrollPostButtonIntoView(frame);
-  const box = await handle.boundingBox();
+  await scrollPostButtonIntoView(frame).catch(() => undefined);
+  const box = await handle.boundingBox().catch(() => null);
   if (box && box.height >= 2 && box.width >= 2) {
     try {
       await human.clickElement(handle);
       return true;
     } catch {
-      /* fallback evaluate */
+      /* fallback */
     }
-    await frame.page().mouse.click(box.x + box.width / 2, box.y + box.height / 2, {
-      delay: 60,
-    });
-    return true;
+    try {
+      await frame.page().mouse.click(box.x + box.width / 2, box.y + box.height / 2, {
+        delay: 60,
+      });
+      return true;
+    } catch {
+      /* evaluate */
+    }
   }
 
-  // Nút ngoài viewport / box null — click DOM trực tiếp
-  const clicked = await frame.evaluate(() => {
-    const btn =
-      (document.querySelector('button[jsname="IJM3w"]') as HTMLElement | null) ||
-      ([...document.querySelectorAll("button")].find((b) =>
-        /^Đăng$/i.test(
-          (b.querySelector('[jsname="V67aGc"]')?.textContent || b.textContent || "").trim(),
-        ),
-      ) as HTMLElement | undefined);
-    if (!btn) return false;
-    btn.scrollIntoView({ block: "center", inline: "nearest" });
-    btn.focus();
-    btn.click();
-    btn.dispatchEvent(
-      new MouseEvent("click", { bubbles: true, cancelable: true, view: window }),
-    );
-    return true;
-  });
+  const clicked = await frame
+    .evaluate(() => {
+      const btn =
+        (document.querySelector('button[jsname="IJM3w"]') as HTMLElement | null) ||
+        ([...document.querySelectorAll("button")].find((b) =>
+          /^Đăng$/i.test(
+            (b.querySelector('[jsname="V67aGc"]')?.textContent || b.textContent || "").trim(),
+          ),
+        ) as HTMLElement | undefined);
+      if (!btn) return false;
+      btn.scrollIntoView({ block: "center", inline: "nearest" });
+      btn.focus();
+      btn.click();
+      btn.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true, view: window }),
+      );
+      return true;
+    })
+    .catch(() => false);
   return clicked;
 }
 
@@ -1689,6 +1686,50 @@ async function resolveSubmitFrame(frame: Frame): Promise<Frame> {
     if (btn) return ctx;
   }
   return frame;
+}
+
+/** Form/nút Đăng đã đóng sau bấm Đăng → coi như đã submit. */
+async function reviewFormClosedAfterPost(frame: Frame): Promise<boolean> {
+  const page = frame.page();
+  for (const ctx of [frame, ...page.frames()]) {
+    const state = await ctx
+      .evaluate(() => {
+        const post = document.querySelector('button[jsname="IJM3w"]');
+        const ta =
+          document.querySelector('textarea[aria-label="Nhập bài đánh giá"]') ||
+          document.querySelector('textarea[jsname="YPqjbf"]') ||
+          document.querySelector("textarea");
+        const writing = /LoadWriteWidget|writereview|WriteWidget/i.test(
+          location.href || "",
+        );
+        const thanks = /cảm ơn|thank you|đã đăng|posted/i.test(
+          document.body?.innerText || "",
+        );
+        return {
+          hasPost: !!post,
+          hasTa: !!ta,
+          writing,
+          thanks,
+        };
+      })
+      .catch(() => null);
+    if (!state) continue;
+    if (state.thanks) return true;
+    // Nút Đăng + textarea biến mất → form đã đóng sau submit
+    if (!state.hasPost && !state.hasTa && !state.writing) return true;
+    if (!state.hasPost && !state.hasTa) return true;
+  }
+  // Iframe WriteWidget biến mất trên page
+  const stillWidget = page.frames().some((f) =>
+    /LoadWriteWidget|writereview|WriteWidget/i.test(f.url() || ""),
+  );
+  const anyPost = await page
+    .frames()
+    .reduce(async (prev, f) => {
+      if (await prev) return true;
+      return !!(await f.$('button[jsname="IJM3w"]').catch(() => null));
+    }, Promise.resolve(false));
+  return !stillWidget && !anyPost;
 }
 
 async function submitReview(frame: Frame, rating: number, human: HumanCursor) {
@@ -1709,29 +1750,48 @@ async function submitReview(frame: Frame, rating: number, human: HumanCursor) {
 
   const ok1 = await clickPostButton(frame, human);
   console.log(`[maps-review] bấm Đăng lần 1 ok=${ok1}`);
-  await sleep(rand(400, 700));
+  if (!ok1) {
+    throw new Error("Không tìm thấy nút Đăng (jsname=IJM3w)");
+  }
+  await sleep(rand(600, 1000));
 
-  // Nếu form còn (chưa sang thank-you) → cuộn lại và bấm lần 2
-  const stillOpen = await frame
-    .$('button[jsname="IJM3w"], textarea, [aria-label*="Nhập bài đánh giá" i]')
-    .catch(() => null);
-  if (stillOpen) {
-    await scrollPostButtonIntoView(frame);
-    await dismissCancelReviewPrompt(frame);
-    const ok2 = await clickPostButton(frame, human);
-    console.log(`[maps-review] bấm Đăng lần 2 (sau cuộn) ok=${ok2}`);
-    if (!ok2) {
-      await scrollPostButtonIntoView(frame);
-      const ok3 = await clickPostButton(frame, human);
-      if (!ok3) throw new Error("Nút Đăng không click được sau khi cuộn");
-    }
+  // Đã Đăng xong → form/nút biến mất = thành công (đừng bấm lần 2 rồi báo lỗi)
+  if (await reviewFormClosedAfterPost(frame)) {
+    console.log("[maps-review] form Đăng đã đóng sau lần 1 — coi như đã đăng");
+    return;
   }
 
+  // Form còn → thử lần 2 (cuộn lại)
+  const stillHasPost = await frame.$('button[jsname="IJM3w"]').catch(() => null);
+  if (!stillHasPost) {
+    console.log("[maps-review] không còn nút Đăng sau lần 1 — OK");
+    return;
+  }
+
+  await scrollPostButtonIntoView(frame);
+  await dismissCancelReviewPrompt(frame);
+  const ok2 = await clickPostButton(frame, human);
+  console.log(`[maps-review] bấm Đăng lần 2 (sau cuộn) ok=${ok2}`);
   await sleep(500);
+  if (await reviewFormClosedAfterPost(frame)) {
+    console.log("[maps-review] form Đăng đã đóng sau lần 2 — OK");
+    return;
+  }
+  if (!ok2) {
+    // Nút mất giữa chừng = đã đăng, không throw
+    console.warn(
+      "[maps-review] lần 2 không bấm được nhưng form có thể đã đóng — tiếp tục xác minh",
+    );
+    return;
+  }
+
+  await sleep(400);
   if (await dismissCancelReviewPrompt(frame)) {
     await sleep(300);
-    await scrollPostButtonIntoView(frame);
-    await clickPostButton(frame, human);
+    if (await frame.$('button[jsname="IJM3w"]').catch(() => null)) {
+      await scrollPostButtonIntoView(frame);
+      await clickPostButton(frame, human);
+    }
   }
 }
 
@@ -2416,143 +2476,246 @@ async function addImages(
   }
 }
 
-async function finishThankYou(page: Page, timeoutMs = 40_000) {
+/** Chỉ nhận URL review Maps thật — loại gstatic / CSS / widget. */
+function isGoodReviewLink(u: string | null | undefined): u is string {
+  if (!u || typeof u !== "string") return false;
+  const s = u.trim();
+  if (!/^https?:\/\//i.test(s)) return false;
+  if (
+    /gstatic\.com|googleapis\.com\/.*\.(css|js)|\/_\/mss\/|boq-one-google|OneGoogleWidget|\.(css|js)(\?|$)/i.test(
+      s,
+    )
+  ) {
+    return false;
+  }
+  return /maps\/reviews|\/maps\/contrib\/\d+|local\/reviews|review\/data|maps\.app\.goo\.gl|goo\.gl\/maps|share\.google/i.test(
+    s,
+  );
+}
+
+function normalizeReviewHref(href: string | null | undefined): string | null {
+  if (!href || typeof href !== "string") return null;
+  let h = href.trim();
+  if (!h || h === "#" || h.startsWith("javascript:")) return null;
+  if (h.startsWith("//")) h = `https:${h}`;
+  else if (h.startsWith("/")) h = `https://www.google.com${h}`;
+  return /^https?:\/\//i.test(h) ? h : null;
+}
+
+/** Click "Xem bài đánh giá" trên màn cảm ơn → lấy URL tab mới / URL hiện tại. */
+async function tryCaptureLinkByViewReviewClick(
+  page: Page,
+  ctx: ReturnType<Page["mainFrame"]>,
+): Promise<string | null> {
+  try {
+    const browser = page.browser();
+    const beforePages = await browser.pages();
+    const beforeUrls = new Set(beforePages.map((p) => p.url()));
+
+    const clicked = await ctx.evaluate(`function __apmViewReviewClick() {
+      var nodes = Array.prototype.slice.call(
+        document.querySelectorAll("a, button, div[role='button'], span[role='button']")
+      );
+      for (var i = 0; i < nodes.length; i++) {
+        var n = nodes[i];
+        var label = ((n.getAttribute("aria-label") || "") + " " + (n.textContent || "")).trim();
+        if (!/xem bài|view (your )?review|view on google|xem trên google|see (your )?review|xem đánh giá/i.test(label)) {
+          continue;
+        }
+        // Ưu tiên <a href> thật
+        var href = n.getAttribute && n.getAttribute("href");
+        if (href && /maps\\/reviews|contrib|local\\/reviews/i.test(href)) {
+          n.click();
+          return href;
+        }
+        var a = n.tagName === "A" ? n : (n.querySelector && n.querySelector("a[href]"));
+        if (a && a.getAttribute) {
+          var h2 = a.getAttribute("href");
+          if (h2) {
+            a.click();
+            return h2;
+          }
+        }
+        n.click();
+        return "clicked";
+      }
+      return null;
+    }`);
+
+    if (!clicked) return null;
+
+    const direct = normalizeReviewHref(
+      typeof clicked === "string" && clicked !== "clicked" ? clicked : null,
+    );
+    if (isGoodReviewLink(direct)) {
+      console.log(`[maps-review] link từ nút Xem bài: ${direct}`);
+      return direct;
+    }
+
+    await sleep(1800);
+    // Tab mới?
+    const afterPages = await browser.pages();
+    for (const p of afterPages) {
+      const u = p.url();
+      if (!beforeUrls.has(u) && isGoodReviewLink(u)) {
+        console.log(`[maps-review] link từ tab mới: ${u}`);
+        return u;
+      }
+      if (isGoodReviewLink(u) && /maps\/reviews|contrib/i.test(u)) {
+        console.log(`[maps-review] link từ URL tab: ${u}`);
+        return u;
+      }
+    }
+    const cur = page.url();
+    if (isGoodReviewLink(cur)) {
+      console.log(`[maps-review] link từ URL hiện tại sau click: ${cur}`);
+      return cur;
+    }
+  } catch (e) {
+    console.warn(
+      "[maps-review] tryCaptureLinkByViewReviewClick:",
+      e instanceof Error ? e.message : e,
+    );
+  }
+  return null;
+}
+
+async function finishThankYou(page: Page, timeoutMs = 45_000) {
   const start = Date.now();
   let bestLink: string | null = null;
   let bestPoints: string | null = null;
+  let sawThank = false;
 
   while (Date.now() - start < timeoutMs) {
-    // Widget đóng / không còn iframe viết review → thường là đã submit
     const stillWriting = page.frames().some((f) =>
       /ReviewsService\.LoadWriteWidget|writereview|WriteWidget/i.test(f.url()),
     );
 
     for (const ctx of [page.mainFrame(), ...page.frames()]) {
       try {
-        const info = await ctx.evaluate(() => {
-          const abs = (href: string | null | undefined) => {
-            if (!href) return null;
-            const h = href.trim();
-            if (!h || h === "#" || h.startsWith("javascript:")) return null;
-            if (/^https?:\/\//i.test(h)) return h;
-            if (h.startsWith("//")) return `https:${h}`;
-            if (h.startsWith("/")) return `https://www.google.com${h}`;
+        // String evaluate — tránh tsx/esbuild inject __name
+        const info = (await ctx.evaluate(`function __apmThankYouInfo() {
+          function abs(href) {
+            if (!href || typeof href !== "string") return null;
+            var h = href.trim();
+            if (!h || h === "#" || h.indexOf("javascript:") === 0) return null;
+            if (/^https?:\\/\\//i.test(h)) return h;
+            if (h.indexOf("//") === 0) return "https:" + h;
+            if (h.charAt(0) === "/") return "https://www.google.com" + h;
             return h;
-          };
-
-          const candidates: string[] = [];
-          const push = (h: string | null | undefined) => {
-            const a = abs(h);
-            if (a) candidates.push(a);
-          };
-
-          const root = document.querySelector("[data-view-profile-post-link]");
-          push(root?.getAttribute("data-view-profile-post-link"));
-
-          for (const el of Array.from(
-            document.querySelectorAll(
-              "[data-view-profile-post-link], [data-href], [data-url], [data-review-url]",
-            ),
-          )) {
+          }
+          function bad(a) {
+            return /gstatic\\.com|\\/_\\/mss\\/|boq-one-google|OneGoogleWidget|\\.(css|js)(\\?|$)/i.test(a);
+          }
+          var candidates = [];
+          function push(h) {
+            var a = abs(h);
+            if (!a || bad(a)) return;
+            candidates.push(a);
+          }
+          var root = document.querySelector("[data-view-profile-post-link]");
+          push(root && root.getAttribute("data-view-profile-post-link"));
+          var els = document.querySelectorAll(
+            "[data-view-profile-post-link], [data-href], [data-url], [data-review-url]"
+          );
+          for (var i = 0; i < els.length; i++) {
+            var el = els[i];
             push(el.getAttribute("data-view-profile-post-link"));
             push(el.getAttribute("data-href"));
             push(el.getAttribute("data-url"));
             push(el.getAttribute("data-review-url"));
           }
-
-          for (const a of Array.from(document.querySelectorAll("a[href]"))) {
-            const href = a.getAttribute("href") || "";
-            if (
-              /maps\/reviews|contrib|\/maps\/contrib|local\/reviews|review\/data/i.test(
-                href,
-              )
-            ) {
+          var anchors = document.querySelectorAll("a[href]");
+          for (var j = 0; j < anchors.length; j++) {
+            var href = anchors[j].getAttribute("href") || "";
+            if (/maps\\/reviews|\\/maps\\/contrib|local\\/reviews|review\\/data/i.test(href)) {
               push(href);
             }
           }
-
-          // Nút/link "Xem bài đánh giá" / "View on Google"
-          for (const el of Array.from(
-            document.querySelectorAll("a, button, div[role='button'], span"),
-          )) {
-            const label =
-              (el.getAttribute("aria-label") || "") +
-              " " +
-              (el.textContent || "");
-            if (
-              /xem bài|view (your )?review|view on google|xem trên google|see (your )?review/i.test(
-                label,
-              )
-            ) {
-              push(el.getAttribute("href"));
-              push(el.getAttribute("data-href"));
-              const nested = el.querySelector?.("a[href]");
-              push(nested?.getAttribute("href"));
+          var nodes = document.querySelectorAll("a, button, div[role='button'], span");
+          for (var k = 0; k < nodes.length; k++) {
+            var n = nodes[k];
+            var label = (n.getAttribute("aria-label") || "") + " " + (n.textContent || "");
+            if (/xem bài|view (your )?review|view on google|xem trên google|see (your )?review/i.test(label)) {
+              push(n.getAttribute("href"));
+              push(n.getAttribute("data-href"));
+              var nested = n.querySelector && n.querySelector("a[href]");
+              if (nested) push(nested.getAttribute("href"));
             }
           }
-
-          const doneBtn = document.querySelector('button[jsname="done-button"]');
-          const body = (document.body?.innerText || "").slice(0, 4000);
-          const thank =
+          var doneBtn = document.querySelector('button[jsname="done-button"]');
+          var body = ((document.body && document.body.innerText) || "").slice(0, 4000);
+          var thank =
             !!doneBtn ||
             !!document.querySelector("#thank-you-title") ||
             !!root ||
-            candidates.length > 0 ||
-            /\+\d+\s*điểm/i.test(body) ||
-            /cảm ơn|thank you|đã đăng|review (has been )?posted|your review/i.test(
-              body,
-            );
-
-          const prefer = candidates.find(
-            (u) => /maps\/reviews|review\/data|contrib/i.test(u),
-          );
-
+            /\\+\\d+\\s*điểm/i.test(body) ||
+            /cảm ơn|thank you|đã đăng|review (has been )?posted|your review posted/i.test(body);
+          var prefer = null;
+          for (var p = 0; p < candidates.length; p++) {
+            if (/maps\\/reviews|review\\/data|\\/maps\\/contrib/i.test(candidates[p])) {
+              prefer = candidates[p];
+              break;
+            }
+          }
           return {
             has: thank,
             link: prefer || candidates[0] || null,
-            points:
-              document.querySelector(".xy1tk")?.textContent?.trim() || null,
+            points: (document.querySelector(".xy1tk") && document.querySelector(".xy1tk").textContent || "").trim() || null,
+            candCount: candidates.length
           };
-        });
+        }`)) as {
+          has: boolean;
+          link: string | null;
+          points: string | null;
+          candCount: number;
+        };
 
-        if (info.link) bestLink = info.link;
+        if (isGoodReviewLink(info.link)) bestLink = info.link;
         if (info.points) bestPoints = info.points;
-
         if (!info.has) continue;
+        sawThank = true;
 
-        // Có thank-you nhưng chưa có link → đợi thêm một nhịp (link hay render chậm)
-        if (!info.link && Date.now() - start < 8_000) {
-          await sleep(400);
+        // Chưa có link tốt → thử click "Xem bài đánh giá"
+        if (!bestLink) {
+          const fromClick = await tryCaptureLinkByViewReviewClick(page, ctx);
+          if (fromClick) bestLink = fromClick;
+        }
+
+        // Đợi thêm nếu vẫn chưa có link (hay render chậm)
+        if (!bestLink && Date.now() - start < 22_000) {
+          await sleep(500);
           continue;
         }
 
-        await ctx.evaluate(() => {
-          (
+        await ctx.evaluate(`function __apmThankYouDone() {
+          var btn =
             document.querySelector('button[jsname="done-button"]') ||
-            [...document.querySelectorAll("button")].find((b) =>
-              /Xong|Done|Đóng|Close/i.test(b.textContent || ""),
-            )
-          )?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-        });
+            Array.prototype.slice.call(document.querySelectorAll("button")).find(function(b) {
+              return /Xong|Done|Đóng|Close/i.test(b.textContent || "");
+            });
+          if (btn) btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        }`);
         await sleep(800);
         console.log(
-          `[maps-review] bắt được màn cảm ơn link=${bestLink || info.link || "n/a"}`,
+          `[maps-review] bắt được màn cảm ơn link=${bestLink || "n/a"}`,
         );
         return {
           ok: true as const,
-          reviewLink: bestLink || info.link,
+          reviewLink: bestLink,
           pointsText: bestPoints || info.points,
         };
-      } catch {
-        /* ignore */
+      } catch (e) {
+        console.warn(
+          "[maps-review] finishThankYou frame eval:",
+          e instanceof Error ? e.message : e,
+        );
       }
     }
 
-    // Form viết đã biến mất sau khi bấm Đăng → coi như thành công (UI đổi)
-    // Nhưng ưu tiên đợi thank-you/link thêm ~12s trước khi bỏ qua
-    if (!stillWriting && Date.now() - start > 12_000) {
+    if (!stillWriting && Date.now() - start > 14_000) {
       console.log(
-        `[maps-review] form đánh giá đã đóng — coi như đã đăng (link=${bestLink || "n/a"})`,
+        `[maps-review] form đánh giá đã đóng — coi như đã đăng (link=${bestLink || "n/a"}, thank=${sawThank})`,
       );
       return {
         ok: true as const,
@@ -2563,15 +2726,15 @@ async function finishThankYou(page: Page, timeoutMs = 40_000) {
     await sleep(500);
   }
   return {
-    ok: bestLink ? (true as const) : (false as const),
+    ok: true as const,
     reviewLink: bestLink,
     pointsText: bestPoints,
   };
 }
 
 /**
- * Sau khi đăng: mở lại place → tìm link review của account
- * (khi màn cảm ơn không trả data-view-profile-post-link).
+ * Sau khi đăng: mở lại place → thu thập href (string) → chọn link review thật.
+ * Dùng string evaluate có TÊN hàm — CDP từ chối `function(){}` ẩn danh.
  */
 async function resolveReviewLinkFromPlace(
   page: Page,
@@ -2580,88 +2743,221 @@ async function resolveReviewLinkFromPlace(
 ): Promise<string | null> {
   const snippet = reviewText.trim().slice(0, 40);
   try {
-    await page.goto(placeUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
+    await page.goto(placeUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 45_000,
+    });
     await sleep(rand(1500, 2500));
     await openReviewsTab(page).catch(() => undefined);
     await sleep(800);
 
-    // Cuộn panel reviews để lộ "Đánh giá của bạn"
-    for (let i = 0; i < 4; i++) {
-      await scrollPlacePanel(page, 220);
+    for (let i = 0; i < 5; i++) {
+      await scrollPlacePanel(page, 240);
     }
 
-    const link = await page.evaluate((snip) => {
-      const abs = (href: string | null | undefined) => {
-        if (!href) return null;
-        const h = href.trim();
-        if (!h || h === "#" || h.startsWith("javascript:")) return null;
-        if (/^https?:\/\//i.test(h)) return h;
-        if (h.startsWith("//")) return `https:${h}`;
-        if (h.startsWith("/")) return `https://www.google.com${h}`;
-        return h;
-      };
-
-      const isReviewUrl = (h: string) =>
-        /maps\/reviews|contrib|local\/reviews|review\/data/i.test(h);
-
-      // 1) Nút chỉnh sửa / đánh giá của bạn gần link
-      const edit = Array.from(
-        document.querySelectorAll("button, a, [role='button']"),
-      ).find((n) =>
-        /Chỉnh sửa bài đánh giá|Edit your review|Đánh giá của bạn|Your review/i.test(
-          (n.getAttribute("aria-label") || "") + " " + (n.textContent || ""),
-        ),
-      ) as HTMLElement | undefined;
-
-      if (edit) {
-        const near = edit.closest("div, article, section, li") || edit.parentElement;
-        const a =
-          (near?.querySelector(
-            'a[href*="maps/reviews"], a[href*="contrib"], a[href*="review"]',
-          ) as HTMLAnchorElement | null) ||
-          (edit.closest("a") as HTMLAnchorElement | null);
-        const u = abs(a?.href || a?.getAttribute("href"));
-        if (u && isReviewUrl(u)) return u;
-      }
-
-      // 2) Card chứa đoạn nội dung vừa đăng
-      if (snip.length >= 8) {
-        const nodes = Array.from(document.querySelectorAll("div, span, p"));
-        const hit = nodes.find((n) => (n.textContent || "").includes(snip));
-        if (hit) {
-          const card =
-            hit.closest("[data-review-id], article, li, .jftiEf, .fontBodyMedium") ||
-            hit.parentElement;
-          const a = card?.querySelector(
-            'a[href*="maps/reviews"], a[href*="contrib"], a[href*="review"]',
-          ) as HTMLAnchorElement | null;
-          const u = abs(a?.href || a?.getAttribute("href"));
-          if (u && isReviewUrl(u)) return u;
-        }
-      }
-
-      // 3) Mọi link review trên panel
-      for (const a of Array.from(
-        document.querySelectorAll(
-          'a[href*="maps/reviews"], a[href*="contrib"], a[href*="local/reviews"]',
-        ),
-      )) {
-        const u = abs((a as HTMLAnchorElement).href || a.getAttribute("href"));
-        if (u && isReviewUrl(u)) return u;
-      }
-
-      return null;
-    }, snippet);
-
+    let link = await collectReviewLinkCandidates(page, snippet);
     if (link) {
       console.log(`[maps-review] lấy được reviewLink từ place: ${link}`);
-    } else {
-      console.warn("[maps-review] không tìm thấy reviewLink trên place sau khi đăng");
+      return link;
     }
-    return link;
+
+    // Thử nút Chia sẻ trên card "Đánh giá của bạn"
+    link = await tryShareOwnReviewLink(page);
+    if (link) {
+      console.log(`[maps-review] lấy được reviewLink từ Chia sẻ: ${link}`);
+      return link;
+    }
+
+    // Fallback: trang đóng góp Maps của account
+    link = await resolveReviewLinkFromContrib(page, snippet);
+    if (link) {
+      console.log(`[maps-review] lấy được reviewLink từ contrib: ${link}`);
+      return link;
+    }
+
+    console.warn("[maps-review] không tìm thấy reviewLink trên place/contrib");
+    return null;
   } catch (e) {
     console.warn(
       "[maps-review] resolveReviewLinkFromPlace failed:",
+      e instanceof Error ? e.message : e,
+    );
+    return null;
+  }
+}
+
+async function collectReviewLinkCandidates(
+  page: Page,
+  snippet: string,
+): Promise<string | null> {
+  const raw = await page.evaluate(
+    `function __apmCollectReviewLinks(snip) {
+      var out = [];
+      function push(h) {
+        if (!h || typeof h !== "string") return;
+        var s = h.trim();
+        if (!s || s === "#" || s.indexOf("javascript:") === 0) return;
+        if (s.indexOf("//") === 0) s = "https:" + s;
+        else if (s.charAt(0) === "/") s = "https://www.google.com" + s;
+        if (!/^https?:\\/\\//i.test(s)) return;
+        if (/gstatic\\.com|\\/_\\/mss\\/|boq-one-google|\\.(css|js)(\\?|$)/i.test(s)) return;
+        if (!/maps\\/reviews|\\/maps\\/contrib|local\\/reviews|review\\/data|contrib\\/\\d+/i.test(s)) return;
+        if (out.indexOf(s) === -1) out.push(s);
+      }
+      var as = document.querySelectorAll("a[href]");
+      for (var i = 0; i < as.length; i++) push(as[i].getAttribute("href"));
+      var ds = document.querySelectorAll("[data-href], [data-url], [data-review-url]");
+      for (var d = 0; d < ds.length; d++) {
+        push(ds[d].getAttribute("data-href"));
+        push(ds[d].getAttribute("data-url"));
+        push(ds[d].getAttribute("data-review-url"));
+      }
+      var buttons = document.querySelectorAll("button, a, [role='button']");
+      for (var b = 0; b < buttons.length; b++) {
+        var n = buttons[b];
+        var label = (n.getAttribute("aria-label") || "") + " " + (n.textContent || "");
+        if (!/Chỉnh sửa bài đánh giá|Edit your review|Đánh giá của bạn|Your review/i.test(label)) continue;
+        var near = n.closest("div, article, section, li") || n.parentElement;
+        if (near) {
+          var links = near.querySelectorAll("a[href]");
+          for (var L = 0; L < links.length; L++) push(links[L].getAttribute("href"));
+        }
+        if (n.tagName === "A") push(n.getAttribute("href"));
+      }
+      if (snip && snip.length >= 8) {
+        var nodes = document.querySelectorAll("div, span, p");
+        for (var j = 0; j < nodes.length; j++) {
+          var t = nodes[j].textContent || "";
+          if (t.indexOf(snip) === -1) continue;
+          var card =
+            nodes[j].closest("[data-review-id], article, li, .jftiEf") ||
+            nodes[j].parentElement;
+          if (!card) continue;
+          var la = card.querySelectorAll("a[href]");
+          for (var k = 0; k < la.length; k++) push(la[k].getAttribute("href"));
+        }
+      }
+      return out;
+    }`,
+    snippet,
+  );
+  const candidates = Array.isArray(raw)
+    ? (raw.filter((x) => typeof x === "string") as string[])
+    : [];
+  console.log(
+    `[maps-review] collectReviewLinkCandidates n=${candidates.length}` +
+      (candidates[0] ? ` first=${candidates[0].slice(0, 80)}` : ""),
+  );
+  return (
+    candidates.find((u) => isGoodReviewLink(u)) ||
+    candidates.map(normalizeReviewHref).find((u) => isGoodReviewLink(u)) ||
+    null
+  );
+}
+
+/** Mở menu Chia sẻ trên review của mình → lấy link trong dialog. */
+async function tryShareOwnReviewLink(page: Page): Promise<string | null> {
+  try {
+    const opened = await page.evaluate(`function __apmOpenShareOwnReview() {
+      var nodes = Array.prototype.slice.call(
+        document.querySelectorAll("button, a, [role='button'], div[role='button']")
+      );
+      var edit = nodes.find(function(n) {
+        var label = (n.getAttribute("aria-label") || "") + " " + (n.textContent || "");
+        return /Chỉnh sửa bài đánh giá|Edit your review|Đánh giá của bạn|Your review/i.test(label);
+      });
+      var root = edit
+        ? edit.closest("div, article, section, li") || edit.parentElement
+        : null;
+      var scope = root ? root.querySelectorAll("button, a, [role='button'], div[role='button']") : nodes;
+      var share = Array.prototype.slice.call(scope).find(function(n) {
+        var label = (n.getAttribute("aria-label") || "") + " " + (n.textContent || "");
+        return /^(Chia sẻ|Share)$/i.test((n.textContent || "").trim()) ||
+          /chia sẻ|share (review|link)?/i.test(label);
+      });
+      if (!share) return false;
+      share.click();
+      return true;
+    }`);
+    if (!opened) return null;
+    await sleep(1500);
+
+    const fromDialog = await page.evaluate(`function __apmReadShareDialogLink() {
+      function abs(h) {
+        if (!h || typeof h !== "string") return null;
+        var s = h.trim();
+        if (!s) return null;
+        if (s.indexOf("//") === 0) s = "https:" + s;
+        else if (s.charAt(0) === "/") s = "https://www.google.com" + s;
+        return s;
+      }
+      var inputs = document.querySelectorAll("input[type='text'], input[readonly], input[value], textarea");
+      for (var i = 0; i < inputs.length; i++) {
+        var v = abs(inputs[i].value || inputs[i].getAttribute("value"));
+        if (v && /maps\\/reviews|\\/maps\\/contrib|goo\\.gl|maps\\.app\\.goo\\.gl|review/i.test(v) &&
+            !/gstatic\\.com|\\/_\\/mss\\//i.test(v)) {
+          return v;
+        }
+      }
+      var as = document.querySelectorAll("a[href]");
+      for (var j = 0; j < as.length; j++) {
+        var h = abs(as[j].getAttribute("href"));
+        if (h && /maps\\/reviews|\\/maps\\/contrib|goo\\.gl|maps\\.app\\.goo\\.gl/i.test(h) &&
+            !/gstatic\\.com|\\/_\\/mss\\//i.test(h)) {
+          return h;
+        }
+      }
+      return null;
+    }`);
+    if (isGoodReviewLink(fromDialog as string) || typeof fromDialog === "string") {
+      const n = normalizeReviewHref(fromDialog as string);
+      if (n && (isGoodReviewLink(n) || /goo\.gl|maps\.app\.goo\.gl/i.test(n))) {
+        return n;
+      }
+    }
+  } catch (e) {
+    console.warn(
+      "[maps-review] tryShareOwnReviewLink:",
+      e instanceof Error ? e.message : e,
+    );
+  }
+  return null;
+}
+
+async function resolveReviewLinkFromContrib(
+  page: Page,
+  snippet: string,
+): Promise<string | null> {
+  try {
+    await page.goto("https://www.google.com/maps/contrib/?hl=vi", {
+      waitUntil: "domcontentloaded",
+      timeout: 40_000,
+    });
+    await sleep(2000);
+    // Tab đánh giá nếu có
+    await page.evaluate(`function __apmContribReviewsTab() {
+      var tabs = Array.prototype.slice.call(
+        document.querySelectorAll("button, a, [role='tab']")
+      );
+      var t = tabs.find(function(n) {
+        var label = ((n.getAttribute("aria-label") || "") + " " + (n.textContent || "")).trim();
+        return /^(Đánh giá|Reviews)$/i.test(label) || /bài đánh giá|reviews/i.test(label);
+      });
+      if (t) t.click();
+    }`);
+    await sleep(1500);
+    for (let i = 0; i < 3; i++) {
+      await page.evaluate(`function __apmContribScroll() {
+        var el = document.querySelector("[role='main']") || document.scrollingElement;
+        if (el) el.scrollTop += 400;
+        else window.scrollBy(0, 400);
+      }`);
+      await sleep(400);
+    }
+    return await collectReviewLinkCandidates(page, snippet);
+  } catch (e) {
+    console.warn(
+      "[maps-review] resolveReviewLinkFromContrib:",
       e instanceof Error ? e.message : e,
     );
     return null;
@@ -3342,7 +3638,7 @@ export async function postMapsReview(
     );
     return {
       ok: true,
-      reviewLink: existingLink,
+      reviewLink: isGoodReviewLink(existingLink) ? existingLink : null,
       pointsText: null,
       placeUrl: payload.placeUrl,
       alreadyReviewed: true,
@@ -3495,7 +3791,8 @@ export async function postMapsReview(
   }
 
   // Thiếu link → scrape lại từ trang place (đánh giá của bạn / card nội dung)
-  if (ok && !reviewLink) {
+  if (ok && !isGoodReviewLink(reviewLink)) {
+    reviewLink = null;
     await keepFocus({ os: "window" });
     reviewLink = await resolveReviewLinkFromPlace(
       page,
@@ -3503,6 +3800,8 @@ export async function postMapsReview(
       payload.reviewText,
     );
   }
+
+  if (!isGoodReviewLink(reviewLink)) reviewLink = null;
 
   return {
     ok,

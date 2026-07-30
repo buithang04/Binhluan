@@ -295,12 +295,20 @@ export class InternalService {
           typeof input.result?.reviewLink === "string"
             ? input.result.reviewLink.trim()
             : "";
-        const reviewLink = reviewLinkRaw
+        const looksLikeMapsReview =
+          !!reviewLinkRaw &&
+          !/gstatic\.com|\/_\/mss\/|boq-one-google|\.(css|js)(\?|$)/i.test(
+            reviewLinkRaw,
+          ) &&
+          /maps\/reviews|\/maps\/contrib|local\/reviews|review\/data|maps\.app\.goo\.gl|goo\.gl\/maps/i.test(
+            reviewLinkRaw,
+          );
+        const reviewLink = looksLikeMapsReview
           ? reviewLinkRaw.startsWith("http")
             ? reviewLinkRaw
             : reviewLinkRaw.startsWith("/")
               ? `https://www.google.com${reviewLinkRaw}`
-              : reviewLinkRaw
+              : null
           : null;
         if (assignmentId) {
           await tx.reviewAssignment.update({

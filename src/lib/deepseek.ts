@@ -9,6 +9,8 @@ type DeepSeekPayload = {
   messages: { role: string; content: string }[];
   temperature?: number;
   max_tokens?: number;
+  /** JSON mode / json_schema — lấy từ Prompt DeepSeek (JSON) nếu có */
+  response_format?: unknown;
 };
 
 export async function callDeepSeekPayload(
@@ -21,24 +23,49 @@ export async function callDeepSeekPayload(
     return { text: null, error: "Thiếu DEEPSEEK_API_KEY trong .env" };
   }
 
+  const buildBody = (responseFormat: unknown | undefined) => ({
+    model: payload.model || "deepseek-v4-flash",
+    messages: payload.messages,
+    temperature: payload.temperature ?? 0.85,
+    max_tokens: payload.max_tokens ?? 800,
+    ...(responseFormat != null ? { response_format: responseFormat } : {}),
+  });
+
   try {
-    const res = await fetch(`${baseUrl}/v1/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: payload.model || "deepseek-chat",
-        messages: payload.messages,
-        temperature: payload.temperature ?? 0.85,
-        max_tokens: payload.max_tokens ?? 800,
-      }),
-    });
+    const attempt = async (responseFormat: unknown | undefined) => {
+      const res = await fetch(`${baseUrl}/v1/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(buildBody(responseFormat)),
+      });
+      const errBody = res.ok ? "" : await res.text().catch(() => "");
+      return { res, errBody };
+    };
+
+    let { res, errBody } = await attempt(payload.response_format);
+
+    // Một số model không hỗ trợ json_schema → fallback json_object (1 lần)
+    if (
+      !res.ok &&
+      payload.response_format &&
+      typeof payload.response_format === "object" &&
+      (payload.response_format as { type?: string }).type === "json_schema" &&
+      (res.status === 400 || /response_format|json_schema|schema|invalid/i.test(errBody))
+    ) {
+      console.warn(
+        "[deepseek] json_schema không hỗ trợ — fallback response_format=json_object",
+      );
+      ({ res, errBody } = await attempt({ type: "json_object" }));
+    }
 
     if (!res.ok) {
-      const errBody = await res.text().catch(() => "");
-      return { text: null, error: `DeepSeek HTTP ${res.status}: ${errBody.slice(0, 200)}` };
+      return {
+        text: null,
+        error: `DeepSeek HTTP ${res.status}: ${errBody.slice(0, 200)}`,
+      };
     }
 
     const data = (await res.json()) as {
@@ -55,7 +82,11 @@ export async function callDeepSeekPayload(
 export async function generateWithPromptJson(
   promptJson: string | null | undefined,
   project: Parameters<typeof buildPromptContext>[0],
-  spinTextOrOpts?: string | { spinText?: string; stars?: number },
+  spinTextOrOpts?: string | {
+    spinText?: string;
+    stars?: number;
+    starLevels?: number[];
+  },
 ): Promise<{ text: string | null; resolvedPayload?: Record<string, unknown>; error?: string }> {
   const raw = promptJson?.trim() || DEFAULT_DEEPSEEK_PROMPT_JSON;
   const ctx = buildPromptContext(project, spinTextOrOpts);

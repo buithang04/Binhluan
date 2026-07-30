@@ -17,6 +17,7 @@ const bodySchema = z.object({
   templateId: z.string().optional(),
   callDeepSeek: z.boolean().optional(),
   stars: z.number().int().min(1).max(5).optional(),
+  starLevels: z.array(z.number().int().min(1).max(5)).optional(),
 });
 
 export async function POST(req: Request, ctx: Ctx) {
@@ -57,10 +58,15 @@ export async function POST(req: Request, ctx: Ctx) {
   }
 
   const sampleStars = body.data.stars ?? 5;
+  const starLevels =
+    body.data.starLevels?.length
+      ? body.data.starLevels
+      : [sampleStars];
   const { buildPromptContext } = await import("@/lib/prompt-template");
   const ctxJson = buildPromptContext(project, {
     spinText,
     stars: sampleStars,
+    starLevels,
   });
 
   const { payload, error } = resolvePromptJson(promptJson, ctxJson);
@@ -72,12 +78,14 @@ export async function POST(req: Request, ctx: Ctx) {
     return NextResponse.json({
       resolvedPayload: payload,
       spinText,
+      starLevels,
     });
   }
 
   const gen = await generateWithPromptJson(promptJson, project, {
     spinText,
     stars: sampleStars,
+    starLevels,
   });
   if (gen.error) {
     return NextResponse.json({ error: gen.error, resolvedPayload: payload }, { status: 502 });
@@ -86,6 +94,7 @@ export async function POST(req: Request, ctx: Ctx) {
   return NextResponse.json({
     resolvedPayload: payload,
     spinText,
+    starLevels,
     preview: gen.text,
   });
 }

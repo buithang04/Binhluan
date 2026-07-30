@@ -172,21 +172,25 @@ export const DEFAULT_DEEPSEEK_PROMPT_JSON = `{
 }`;
 
 /**
- * Prompt mặc định khi sinh template spin theo sao (nội dung bình luận theo sao).
- * Biến {{ $json.settings.stars }} được inject theo từng mức sao khi generate.
+ * Prompt mặc định — 1 lần call DeepSeek sinh TẤT CẢ mức sao cần dùng.
+ * Biến: star_levels / star_guide / star_levels_count (inject theo phân bổ dự án).
+ * response_format: json_object (ổn định trên DeepSeek). Có thể đổi sang json_schema trong Prompt JSON nếu model hỗ trợ.
  */
 export const DEFAULT_STAR_SPIN_PROMPT_JSON = `{
-  "model": "deepseek-chat",
+  "model": "deepseek-v4-flash",
   "temperature": 0.9,
-  "max_tokens": 600,
+  "max_tokens": 2500,
+  "response_format": {
+    "type": "json_object"
+  },
   "messages": [
     {
       "role": "system",
-      "content": "Bạn viết template spin bình luận Google Maps bằng {{ $json.settings.content_language }}. Chỉ trả về template dùng cú pháp {lựa chọn 1|lựa chọn 2|lựa chọn 3} cho các cụm có thể thay đổi. Không JSON, không giải thích. Mỗi block 3-5 phương án tự nhiên. Giọng văn phải phù hợp {{ $json.settings.stars }} sao: {{ $json.settings.star_label }}."
+      "content": "Bạn viết template spin bình luận Google Maps bằng {{ $json.settings.content_language }}. Trả về đúng JSON theo schema (không markdown, không giải thích). Mỗi phần tử templates gồm stars + template. Chỉ gồm đúng các mức sao: {{ $json.settings.star_levels }}. Template dùng cú pháp {lựa chọn 1|lựa chọn 2|lựa chọn 3}, mỗi block 3-5 phương án tự nhiên. Giọng theo từng sao:\\n{{ $json.settings.star_guide }}"
     },
     {
       "role": "user",
-      "content": "Thương hiệu: {{ $json.project.brand_name }}\\nWebsite: {{ $json.project.website }}\\nMô tả: {{ $json.project.brand_description }}\\nKhách hàng: {{ $json.project.target_audience }}\\nThị trường: {{ $json.project.target_market }}\\nSản phẩm:\\n{{ $json.project.product_list }}\\n\\nĐịnh hướng: {{ $json.settings.content_direction }}\\nVí dụ: {{ $json.settings.content_example }}\\nSố từ khi resolve: {{ $json.settings.content_word_count }}\\n\\nViết 1 template spin cho bình luận Google Maps {{ $json.settings.stars }} sao. Dùng {a|b|c} cho mở đầu, nội dung, kết. Nhắc địa điểm tự nhiên."
+      "content": "Thương hiệu: {{ $json.project.brand_name }}\\nWebsite: {{ $json.project.website }}\\nMô tả: {{ $json.project.brand_description }}\\nKhách hàng: {{ $json.project.target_audience }}\\nThị trường: {{ $json.project.target_market }}\\nSản phẩm:\\n{{ $json.project.product_list }}\\n\\nĐịnh hướng: {{ $json.settings.content_direction }}\\nVí dụ: {{ $json.settings.content_example }}\\nSố từ khi resolve: {{ $json.settings.content_word_count }}\\n\\nSinh {{ $json.settings.star_levels_count }} template spin (mỗi mức sao 1 template) cho các mức: {{ $json.settings.star_levels }}. Dùng {a|b|c} cho mở đầu, nội dung, kết. Nhắc địa điểm tự nhiên."
     }
   ]
 }`;
@@ -217,8 +221,11 @@ export const PROMPT_VARIABLE_GROUPS: {
       { path: "$json.settings.content_language", label: "Ngôn ngữ" },
       { path: "$json.settings.content_example", label: "Ví dụ tham khảo" },
       { path: "$json.settings.content_word_count", label: "Số từ" },
-      { path: "$json.settings.stars", label: "Mức sao (khi sinh)" },
-      { path: "$json.settings.star_label", label: "Nhãn giọng theo sao" },
+      { path: "$json.settings.star_levels", label: "Các mức sao (batch)" },
+      { path: "$json.settings.star_levels_count", label: "Số mức sao" },
+      { path: "$json.settings.star_guide", label: "Hướng dẫn giọng theo sao" },
+      { path: "$json.settings.stars", label: "1 mức sao (legacy)" },
+      { path: "$json.settings.star_label", label: "Nhãn 1 mức sao (legacy)" },
     ],
   },
   {
@@ -300,7 +307,12 @@ export function buildPromptContext(
     contentWordCount?: number | null;
     products: { name: string; description: string }[];
   },
-  spinTextOrOpts?: string | { spinText?: string; stars?: number },
+  spinTextOrOpts?: string | {
+    spinText?: string;
+    stars?: number;
+    /** Các mức sao cần sinh trong 1 lần call (vd [3,4,5]) */
+    starLevels?: number[];
+  },
 ): PromptContextJson {
   const opts =
     typeof spinTextOrOpts === "string"
@@ -315,6 +327,14 @@ export function buildPromptContext(
     opts.stars != null
       ? Math.min(5, Math.max(1, Math.round(opts.stars)))
       : null;
+
+  const starLevels = (opts.starLevels || [])
+    .map((s) => Math.min(5, Math.max(1, Math.round(s))))
+    .filter((s, i, arr) => Number.isFinite(s) && arr.indexOf(s) === i)
+    .sort((a, b) => a - b);
+
+  const levelsForGuide =
+    starLevels.length > 0 ? starLevels : star != null ? [star] : [];
 
   const ctx: PromptContextJson = {
     project: {
@@ -334,8 +354,18 @@ export function buildPromptContext(
       content_example: project.contentExample || "",
       content_word_count:
         project.contentWordCount != null ? String(project.contentWordCount) : "",
-      stars: star != null ? String(star) : "",
-      star_label: star != null ? STAR_LABELS_FOR_PROMPT[star] || "" : "",
+      stars: star != null ? String(star) : levelsForGuide[0] != null ? String(levelsForGuide[0]) : "",
+      star_label:
+        star != null
+          ? STAR_LABELS_FOR_PROMPT[star] || ""
+          : levelsForGuide[0] != null
+            ? STAR_LABELS_FOR_PROMPT[levelsForGuide[0]] || ""
+            : "",
+      star_levels: levelsForGuide.join(", "),
+      star_levels_count: levelsForGuide.length ? String(levelsForGuide.length) : "",
+      star_guide: levelsForGuide
+        .map((s) => `${s}★: ${STAR_LABELS_FOR_PROMPT[s] || ""}`)
+        .join("\n"),
     },
   };
 

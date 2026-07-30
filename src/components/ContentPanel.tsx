@@ -219,6 +219,12 @@ export function ContentPanel({
         body: JSON.stringify({
           promptJson: contentPromptJson,
           callDeepSeek: false,
+          starLevels: starPlan
+            ? Object.entries(starPlan.countsByStar)
+                .filter(([, n]) => n > 0)
+                .map(([s]) => Number(s))
+                .filter((n) => n >= 1 && n <= 5)
+            : [5],
         }),
       });
       const data = await res.json();
@@ -379,9 +385,9 @@ export function ContentPanel({
           Nội dung bình luận theo sao
         </h2>
         <p className="mt-1 text-sm text-[var(--muted)]">
-          DeepSeek sinh template spin cho từng mức sao cần dùng. Khi đăng bài, hệ thống random
-          trong các block {"{a|b|c}"}. Mỗi dự án chỉ sinh 1 lần — có thể chỉnh sửa template sau
-          khi sinh.
+          DeepSeek gọi <strong>1 lần</strong> sinh đủ template spin cho các mức sao cần dùng
+          (vd 3+4+5★ → 1 response JSON). Khi đăng bài, hệ thống random trong block {"{a|b|c}"}.
+          Mỗi dự án chỉ sinh 1 lần — có thể chỉnh sửa template sau khi sinh.
         </p>
       </div>
 
@@ -470,8 +476,10 @@ export function ContentPanel({
               Prompt DeepSeek (JSON)
             </p>
             <p className="mt-0.5 text-xs text-[var(--muted)]">
-              Sửa prompt trước khi sinh. Dùng {"{{ $json.... }}"} — khi generate,{" "}
-              <code className="font-mono">$json.settings.stars</code> được gắn theo từng mức sao.
+              Sửa prompt + <code className="font-mono">response_format</code> (schema) trước khi
+              sinh. Dùng {"{{ $json.settings.star_levels }}"} — hệ thống gắn sẵn các mức sao cần
+              dùng (1 lần call ra đủ). Prompt cũ chỉ có{" "}
+              <code className="font-mono">stars</code> → bấm Reset mặc định.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -553,7 +561,7 @@ export function ContentPanel({
             ? "Đang sinh…"
             : generatedAt
               ? "Đã sinh nội dung"
-              : `Sinh nội dung (${neededStars.length} mức sao)`}
+              : `Sinh nội dung (${neededStars.length} mức · 1 call)`}
         </button>
       </div>
 
