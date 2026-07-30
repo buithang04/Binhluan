@@ -2684,6 +2684,22 @@ async function runMapsReviewJob(
         `[worker] MAPS_REVIEW #${claim.profile.browserIndex} đã có review trước đó — đánh dấu hoàn thành`,
       );
     }
+
+    // Thoát proxy + mở lại Chrome hồ sơ (myaccount, IP máy)
+    let restoredProfileNoProxy = false;
+    try {
+      await restoreProfileBrowserAfterMaps(claim, profilePath);
+      // Cập nhật pid cho finally (Chrome mới, không proxy)
+      chromePid =
+        browserPool.get(claim.profile.id)?.pid ||
+        (await resolveChromePidByProfileDir(profilePath).catch(() => undefined));
+      restoredProfileNoProxy = true;
+    } catch (e) {
+      console.warn(
+        `[worker] MAPS #${claim.profile.browserIndex} restore hồ sơ sau đăng lỗi (review vẫn OK): ${e instanceof Error ? e.message : e}`,
+      );
+    }
+
     return {
       browserVersion,
       keepAlive: true,
@@ -2705,6 +2721,7 @@ async function runMapsReviewJob(
         browserIndex: claim.profile.browserIndex,
         email: claim.account.email,
         browserAlive: true,
+        restoredProfileNoProxy,
       },
     };
   } finally {
@@ -2718,6 +2735,98 @@ async function runMapsReviewJob(
       setTimeout(() => stopChromeWindowWatchdog(pid), 30_000).unref?.();
     }
   }
+}
+
+/** Đóng Chrome proxy rồi mở lại IP máy + tab hồ sơ myaccount (sau MAPS thành công). */
+async function restoreProfileBrowserAfterMaps(
+  claim: ClaimPayload,
+  profilePath: string,
+): Promise<void> {
+  const idx = claim.profile.browserIndex;
+  console.log(
+    `[worker] MAPS #${idx} xong → thoát proxy, mở lại Chrome hồ sơ (IP máy + myaccount)`,
+  );
+
+  // Cho phép forceClose (tắt maps guard tạm)
+  setMapsChromeGuard(false);
+  {
+    const pooled = browserPool.get(claim.profile.id);
+    if (pooled) pooled.mapsReviewInProgress = false;
+  }
+
+  logChromeCloseIntent("forceClose", `MAPS proxy-off #${idx}`);
+  await browserPool.release(claim.profile.id, true, { forceClose: true }).catch(
+    () => undefined,
+  );
+
+  for (let i = 0; i < 40; i++) {
+    const still = await resolveChromePidByProfileDir(profilePath).catch(
+      () => undefined,
+    );
+    if (!still) break;
+    if (i === 20) {
+      console.warn(`[worker] MAPS #${idx} chờ Chrome tắt (proxy-off) pid=${still}…`);
+    }
+    await new Promise((r) => setTimeout(r, 400));
+  }
+  const stuck = await resolveChromePidByProfileDir(profilePath).catch(
+    () => undefined,
+  );
+  if (stuck) {
+    console.warn(
+      `[worker] MAPS #${idx} force Stop-Process pid=${stuck} để thoát proxy`,
+    );
+    const prev = process.env.ALLOW_CHROME_KILL;
+    process.env.ALLOW_CHROME_KILL = "1";
+    try {
+      await killChromeUsingProfileDir(profilePath);
+    } finally {
+      if (prev === undefined) delete process.env.ALLOW_CHROME_KILL;
+      else process.env.ALLOW_CHROME_KILL = prev;
+    }
+    await new Promise((r) => setTimeout(r, 900));
+  }
+
+  // Mở lại KHÔNG proxy (= LOGIN / hồ sơ thường)
+  const ensured = await connectOrLaunchBrowser(claim, {
+    useProxy: false,
+    neverKill: true,
+  });
+  const browser = ensured.browser;
+  const chromePid = ensured.pid;
+  const page = await setupPage(browser, claim, { useProxy: false });
+
+  await browserPool.register({
+    profileId: claim.profile.id,
+    browserIndex: claim.profile.browserIndex,
+    browser,
+    page,
+    proxyId: claim.proxy?.id ?? "none",
+    cookiePath: claim.profile.cookiePath,
+    browserProfilePath: claim.profile.browserProfilePath,
+    openedAt: new Date(),
+    pid: chromePid || browser.process()?.pid,
+    accountEmail: claim.account.email,
+    markedReady: true,
+    proxyEnabled: false,
+    mapsReviewInProgress: false,
+    proxyAuth: null,
+  });
+
+  const human = new HumanCursor(page);
+  await ensureOnGoogleAccountProfile(page, human, {
+    forceGoto: true,
+    chromePid: chromePid || browser.process()?.pid,
+  });
+  await page.bringToFront().catch(() => undefined);
+  if (chromePid) {
+    await ensureChromeWindowVisible(chromePid, `maps-proxy-off:#${idx}`).catch(
+      () => undefined,
+    );
+  }
+  console.log(
+    `[worker] MAPS #${idx} đã về hồ sơ myaccount (proxy=OFF) url=${page.url().slice(0, 80)}`,
+  );
 }
 
 /** Timeout cứng theo task — 1 job treo (CDP đơ, dialog nền…) không được chặn cả hàng đợi. */

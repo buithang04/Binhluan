@@ -689,20 +689,53 @@ async function readSelectedRating(frame: Frame): Promise<number | null> {
         return false;
       };
 
-      // 1) radiogroup.data-rating: chưa chọn = "0", đã chọn = "1".."5"
-      for (const group of Array.from(
-        document.querySelectorAll('[role="radiogroup"]'),
-      ) as HTMLElement[]) {
+      // 1) radiogroup "Xếp hạng theo sao" data-rating (0→chưa, 1..5→đã chọn)
+      const rankGroups = Array.from(
+        document.querySelectorAll(
+          '[role="radiogroup"][aria-label*="Xếp hạng" i], [role="radiogroup"][aria-label*="star" i], div.lv4IMd[role="radiogroup"]',
+        ),
+      ) as HTMLElement[];
+      const groups =
+        rankGroups.length > 0
+          ? rankGroups
+          : (Array.from(document.querySelectorAll('[role="radiogroup"]')) as HTMLElement[]);
+      for (const group of groups) {
         for (const attr of ["data-rating", "data-value", "aria-valuenow"]) {
           const v = Number(group.getAttribute(attr));
           if (v >= 1 && v <= 5) return v;
         }
-        // aria-label trên group đôi khi chứa số sao
+        // Sao đã chọn: aria-checked trên .s2xyy
+        const checked = group.querySelector(
+          'div.s2xyy[role="radio"][aria-checked="true"], [role="radio"][aria-checked="true"]',
+        ) as HTMLElement | null;
+        if (checked) {
+          const d = Number(checked.getAttribute("data-rating"));
+          if (d >= 1 && d <= 5) return d;
+          const lb = fromLabel(checked);
+          if (lb) return lb;
+        }
+        // SVG fill đổi màu (không còn #80868b) = sao đã tô
+        const radios = Array.from(
+          group.querySelectorAll('div.s2xyy[role="radio"], [role="radio"]'),
+        ).filter((el) => el.getAttribute("data-rating") !== "0") as HTMLElement[];
+        let filled = 0;
+        for (let i = 0; i < radios.length && i < 5; i++) {
+          const path = radios[i]!.querySelector("path");
+          const fill = (path?.getAttribute("fill") || "").toLowerCase();
+          const painted =
+            fill &&
+            fill !== "#80868b" &&
+            fill !== "none" &&
+            !fill.includes("80868b");
+          if (painted || isFilledLook(radios[i]!)) filled = i + 1;
+          else break;
+        }
+        if (filled >= 1) return filled;
         const gl = fromLabel(group);
         if (gl) return gl;
       }
 
-      // 2) radio đang checked / selected
+      // 2) radio đang checked / selected (toàn document)
       const checked = document.querySelector(
         '[role="radio"][aria-checked="true"], [role="radio"][aria-selected="true"], [role="radio"][aria-pressed="true"]',
       ) as HTMLElement | null;
@@ -715,34 +748,6 @@ async function readSelectedRating(frame: Frame): Promise<number | null> {
         if (p >= 1 && p <= 5) return p;
       }
 
-      // 3) Đếm sao tô màu từ trái → phải trong radiogroup (5 radio)
-      for (const group of Array.from(
-        document.querySelectorAll('[role="radiogroup"]'),
-      )) {
-        const radios = Array.from(
-          group.querySelectorAll('[role="radio"]'),
-        ).filter((el) => el.getAttribute("data-rating") !== "0") as HTMLElement[];
-        if (radios.length < 3) continue;
-        let filled = 0;
-        for (let i = 0; i < radios.length && i < 5; i++) {
-          if (isFilledLook(radios[i]!)) filled = i + 1;
-          else break; // hàng sao: tô liên tục từ trái
-        }
-        // Nếu không liên tục, lấy max index đã tô
-        if (filled === 0) {
-          radios.forEach((el, i) => {
-            if (isFilledLook(el)) {
-              const r =
-                fromLabel(el) ||
-                Number(el.getAttribute("data-rating")) ||
-                i + 1;
-              if (r >= 1 && r <= 5 && r > filled) filled = r;
-            }
-          });
-        }
-        if (filled >= 1) return filled;
-      }
-
       return null;
     });
   } catch {
@@ -751,7 +756,9 @@ async function readSelectedRating(frame: Frame): Promise<number | null> {
 }
 
 /**
- * Click sao trong DOM (ưu tiên aria-label VI: Một/Hai/Ba/Bốn/Năm sao).
+ * Click sao trong DOM — theo đúng Maps VI:
+ * radiogroup[aria-label="Xếp hạng theo sao"] > div.s2xyy[role=radio][data-rating=1..5]
+ * aria-label: Một/Hai/Ba/Bốn/Năm sao
  */
 async function clickStarInDom(
   frame: Frame,
@@ -760,186 +767,210 @@ async function clickStarInDom(
   const rating = Math.min(5, Math.max(1, Math.round(value)));
   const viLabels = VI_STAR_ARIA[rating] || [`${rating} sao`];
 
-  // 1) Puppeteer handle theo aria-label VI (ổn định hơn evaluate lớn)
-  for (const label of viLabels) {
-    try {
-      const handle =
-        (await frame.$(`[role="radio"][aria-label="${label}"]`)) ||
-        (await frame.$(`[aria-label="${label}"]`)) ||
-        (await frame.$(`button[aria-label="${label}"]`));
-      if (!handle) continue;
-      const box = await handle.boundingBox();
-      if (!box || box.width < 4 || box.height < 4) continue;
-      await handle.evaluate((el) => {
-        (el as HTMLElement).scrollIntoView({ block: "center", inline: "nearest" });
-        (el as HTMLElement).click();
-      });
-      await sleep(600);
-      let selected = await readSelectedRating(frame);
-      if (selected === rating) {
-        return { ok: true, via: "aria-vi", selected, detail: label };
-      }
-      // Click lần 2 bằng mouse tọa độ
-      await handle.click({ delay: 60 }).catch(() => undefined);
-      await sleep(700);
-      selected = await readSelectedRating(frame);
-      // Đã bấm đúng nhãn VI — tin radiogroup / visual; nếu vẫn null thì vẫn báo ok+via để selectStar poll
-      return {
-        ok: true,
-        via: selected === rating ? "aria-vi-mouse" : "aria-vi-clicked",
-        selected,
-        detail: label,
-      };
-    } catch {
-      /* next label */
-    }
-  }
-
-  // 2) data-rating đúng số (1..5) — bỏ data-rating=0
-  try {
-    const byData =
-      (await frame.$(`[role="radio"][data-rating="${rating}"]`)) ||
-      (await frame.$(`[data-rating="${rating}"]`));
-    if (byData) {
-      await byData.evaluate((el) => (el as HTMLElement).click());
-      await sleep(400);
-      const selected = await readSelectedRating(frame);
-      if (selected === rating) {
-        return { ok: true, via: "data-rating", selected };
-      }
-    }
-  } catch {
-    /* continue */
-  }
-
-  // 3) Đúng 5 radio trong radiogroup → click theo index
-  try {
-    const radios = await frame.$$('[role="radiogroup"] [role="radio"]');
-    const usable = [];
-    for (const r of radios) {
-      const dr = await r.evaluate((el) => el.getAttribute("data-rating"));
-      if (dr === "0") continue;
-      usable.push(r);
-    }
-    const list = usable.length >= 5 ? usable.slice(0, 5) : radios.slice(0, 5);
-    if (list.length >= rating) {
-      const target = list[rating - 1]!;
-      await target.evaluate((el) => {
-        (el as HTMLElement).scrollIntoView({ block: "center" });
-        (el as HTMLElement).click();
-      });
-      await sleep(400);
-      const selected = await readSelectedRating(frame);
-      return {
-        ok: selected === rating,
-        via: "radiogroup-index",
-        selected,
-        detail: `n=${list.length}`,
-      };
-    }
-  } catch {
-    /* continue */
-  }
-
-  // 4) evaluate fallback (VI label + data-rating)
-  try {
-    return await frame.evaluate(
-      (want, labels) => {
-        const fire = (el: Element) => {
-          const h = el as HTMLElement;
-          h.scrollIntoView({ block: "center", inline: "nearest" });
-          try {
-            h.focus?.();
-          } catch {
-            /* ignore */
-          }
+  // Chuỗi pointer/mouse đầy đủ (jsaction Maps cần pointerdown→click, không chỉ .click())
+  return frame.evaluate(
+    (want, labels) => {
+      const fire = (el: Element) => {
+        const h = el as HTMLElement;
+        h.scrollIntoView({ block: "center", inline: "nearest" });
+        try {
+          h.focus?.();
+        } catch {
+          /* ignore */
+        }
+        for (const type of [
+          "pointerover",
+          "mouseover",
+          "pointerenter",
+          "mouseenter",
+          "pointerdown",
+          "mousedown",
+          "pointerup",
+          "mouseup",
+          "click",
+        ] as const) {
+          h.dispatchEvent(
+            new MouseEvent(type, { bubbles: true, cancelable: true, view: window }),
+          );
+        }
+        try {
           h.click();
-        };
-        const labelOf = (el: Element) =>
-          ((el.getAttribute("aria-label") || "") + " " + (el.getAttribute("title") || "")).trim();
-        const norm = (s: string) =>
-          s
-            .toLowerCase()
-            .normalize("NFD")
-            .replace(/[\u0300-\u036f]/g, "")
-            .replace(/\s+/g, " ")
-            .trim();
-        const matchLabel = (label: string) => {
-          const t = norm(label);
-          for (const L of labels) {
-            if (t === norm(L) || t.includes(norm(L))) return true;
-          }
-          return new RegExp(`\\b${want}\\s*(sao|stars?)\\b`, "i").test(label);
-        };
-        const readSelected = (): number | null => {
-          const checked = document.querySelector(
-            '[role="radio"][aria-checked="true"]',
-          ) as HTMLElement | null;
-          if (!checked) return null;
-          const lb = labelOf(checked);
-          const t = norm(lb);
-          if (/nam sao|five star|\b5\s*sao/.test(t)) return 5;
-          if (/bon sao|four star|\b4\s*sao/.test(t)) return 4;
-          if (/ba sao|three star|\b3\s*sao/.test(t)) return 3;
-          if (/hai sao|two star|\b2\s*sao/.test(t)) return 2;
-          if (/mot sao|one star|\b1\s*sao/.test(t)) return 1;
-          const d = Number(checked.getAttribute("data-rating"));
-          return d >= 1 && d <= 5 ? d : null;
-        };
+        } catch {
+          /* ignore */
+        }
+      };
 
-        for (const L of labels) {
-          const el = document.querySelector(
-            `[role="radio"][aria-label="${L}"], [aria-label="${L}"]`,
+      const labelOf = (el: Element) =>
+        (
+          (el.getAttribute("aria-label") || "") +
+          " " +
+          (el.getAttribute("title") || "") +
+          " " +
+          (el.getAttribute("data-tooltip") || "")
+        ).trim();
+
+      const matchRatingLabel = (label: string, n: number) => {
+        const raw = (label || "").trim();
+        if (!raw) return false;
+        const t = raw
+          .toLowerCase()
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .replace(/\s+/g, " ")
+          .trim();
+        const words: Record<number, string[]> = {
+          1: ["mot sao", "one star", "1 sao", "1 star"],
+          2: ["hai sao", "two star", "2 sao", "2 star"],
+          3: ["ba sao", "three star", "3 sao", "3 star"],
+          4: ["bon sao", "four star", "4 sao", "4 star"],
+          5: ["nam sao", "five star", "5 sao", "5 star"],
+        };
+        if ((words[n] || []).some((w) => t === w || t.startsWith(w + " "))) return true;
+        return (
+          new RegExp(`\\b${n}\\s*(sao|stars?)\\b`, "i").test(raw) ||
+          new RegExp(`\\b${n}\\s*tren\\s*5\\b`, "i").test(t) ||
+          new RegExp(`\\b${n}\\s*out\\s*of\\s*5\\b`, "i").test(t)
+        );
+      };
+
+      const readSelected = (): number | null => {
+        const groups = Array.from(
+          document.querySelectorAll(
+            '[role="radiogroup"][aria-label*="Xếp hạng" i], [role="radiogroup"][aria-label*="star" i], div.lv4IMd[role="radiogroup"]',
+          ),
+        );
+        for (const g of groups) {
+          const v = Number(
+            g.getAttribute("data-rating") ||
+              g.getAttribute("data-value") ||
+              g.getAttribute("aria-valuenow") ||
+              0,
+          );
+          if (v >= 1 && v <= 5) return v;
+        }
+        const checked = document.querySelector(
+          '[role="radio"][aria-checked="true"], [data-rating][aria-checked="true"], .s2xyy[aria-checked="true"]',
+        ) as HTMLElement | null;
+        if (checked) {
+          const d = Number(checked.getAttribute("data-rating"));
+          if (d >= 1 && d <= 5) return d;
+          const p = Number(checked.getAttribute("aria-posinset"));
+          if (p >= 1 && p <= 5) return p;
+          for (let n = 5; n >= 1; n--) {
+            if (matchRatingLabel(labelOf(checked), n)) return n;
+          }
+        }
+        const filled = Array.from(
+          document.querySelectorAll(
+            '[data-rating].selected, [data-rating][aria-checked="true"], .s2xyy[aria-checked="true"]',
+          ),
+        ) as HTMLElement[];
+        let max = 0;
+        for (const el of filled) {
+          const r = Number(el.getAttribute("data-rating"));
+          if (r > max) max = r;
+        }
+        return max > 0 ? max : null;
+      };
+
+      const group =
+        document.querySelector('[role="radiogroup"][aria-label*="Xếp hạng" i]') ||
+        document.querySelector('[role="radiogroup"][aria-label*="star" i]') ||
+        document.querySelector('div.lv4IMd[role="radiogroup"]') ||
+        document.querySelector('[role="radiogroup"]');
+      const roots: ParentNode[] = [
+        ...(group ? [group] : []),
+        ...Array.from(document.querySelectorAll('div[role="radiogroup"]')),
+        ...Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"]')),
+        document.body,
+      ].filter(Boolean) as ParentNode[];
+
+      for (const root of roots) {
+        // 1) VI aria-label chính xác (Một/Hai/…/Năm sao)
+        for (const L of labels as string[]) {
+          const el = root.querySelector(
+            `div.s2xyy[role="radio"][aria-label="${L}"], [role="radio"][aria-label="${L}"], [aria-label="${L}"]`,
           ) as HTMLElement | null;
           if (el) {
             fire(el);
-            return { ok: true, via: "aria-label", selected: readSelected(), detail: L };
+            return {
+              ok: true,
+              via: "aria-vi",
+              selected: readSelected(),
+              detail: L,
+            };
           }
         }
-        const byData = document.querySelector(
-          `[role="radio"][data-rating="${want}"], [data-rating="${want}"]`,
+
+        // 2) data-rating / .s2xyy
+        const byData = root.querySelector(
+          `div.s2xyy[role="radio"][data-rating="${want}"], [role="radio"][data-rating="${want}"], [data-rating="${want}"], [data-value="${want}"]`,
         ) as HTMLElement | null;
-        if (byData) {
+        if (byData && byData.getAttribute("role") !== "radiogroup") {
           fire(byData);
           return { ok: true, via: "data-rating", selected: readSelected() };
         }
-        const radios = Array.from(
-          document.querySelectorAll('[role="radiogroup"] [role="radio"]'),
-        ).filter((el) => el.getAttribute("data-rating") !== "0") as HTMLElement[];
-        if (radios.length >= want) {
-          fire(radios[want - 1]!);
-          return { ok: true, via: "index", selected: readSelected() };
+
+        // 3) match label fuzzy trong radiogroup
+        const labeled = Array.from(
+          root.querySelectorAll(
+            "[aria-label], [title], button, [role='radio'], div.s2xyy",
+          ),
+        ).find((el) => matchRatingLabel(labelOf(el), want)) as HTMLElement | undefined;
+        if (labeled) {
+          fire(labeled);
+          return { ok: true, via: "aria-label", selected: readSelected() };
         }
-        // Quét mọi aria-label
-        const hit = Array.from(
-          document.querySelectorAll("[aria-label], [role='radio']"),
-        ).find((el) => matchLabel(labelOf(el))) as HTMLElement | undefined;
-        if (hit) {
-          fire(hit);
-          return { ok: true, via: "aria-scan", selected: readSelected() };
+
+        // 4) aria-posinset
+        const byPos = root.querySelector(
+          `[role="radio"][aria-posinset="${want}"], [aria-posinset="${want}"]`,
+        ) as HTMLElement | null;
+        if (byPos) {
+          fire(byPos);
+          return { ok: true, via: "aria-posinset", selected: readSelected() };
         }
-        return {
-          ok: false,
-          via: "none",
-          selected: null,
-          detail: `labels=${labels.slice(0, 3).join("|")}`,
-        };
-      },
-      rating,
-      viLabels,
-    );
-  } catch (e) {
-    return {
-      ok: false,
-      via: "err",
-      selected: null,
-      detail: e instanceof Error ? e.message.slice(0, 80) : "evaluate_failed",
-    };
-  }
+
+        // 5) đúng 5 .s2xyy → index
+        const clickables = Array.from(
+          root.querySelectorAll(
+            'div.s2xyy[role="radio"], [role="radio"], div.s2xyy, [data-rating]',
+          ),
+        ).filter((el) => {
+          if (el.getAttribute("data-rating") === "0" && el.getAttribute("role") === "radiogroup") {
+            return false;
+          }
+          const b = (el as HTMLElement).getBoundingClientRect();
+          return b.width >= 8 && b.height >= 8 && b.bottom > 0 && b.right > 0;
+        }) as HTMLElement[];
+        const stars = clickables.length >= 5 ? clickables.slice(0, 5) : clickables;
+        if (stars.length >= 3) {
+          const target = stars[want - 1] || stars[stars.length - 1];
+          if (target) {
+            fire(target);
+            return {
+              ok: true,
+              via: `index:${stars.length}`,
+              selected: readSelected(),
+            };
+          }
+        }
+      }
+
+      return {
+        ok: false,
+        via: "none",
+        selected: null,
+        detail: `bodyLen=${(document.body?.innerText || "").length}`,
+      };
+    },
+    rating,
+    viLabels,
+  );
 }
 
 const CONFIDENT_STAR_VIA =
-  /^(data-rating|aria-label|aria-vi|aria-vi-mouse|aria-vi-clicked|aria-posinset|aria-scan|radiogroup-index|row5|index)/i;
+  /^(data-rating|aria-label|aria-vi|aria-posinset|radiogroup-index|row5|index|s2xyy)/i;
 
 /** Poll đọc sao sau click — Maps cập nhật data-rating radiogroup hơi chậm. */
 async function waitSelectedRating(
@@ -1000,8 +1031,9 @@ async function selectStar(page: Page, value: number, _human: HumanCursor) {
 
   let lastVia = "none";
   let lastDetail = "";
+  let confidentHits = 0;
 
-  for (let attempt = 0; attempt < 6; attempt++) {
+  for (let attempt = 0; attempt < 10; attempt++) {
     // Chỉ click trong frame form review thật (WriteWidget / có textarea).
     const scoredFrames = await Promise.all(
       page.frames().map(async (frame) => ({
@@ -1048,10 +1080,11 @@ async function selectStar(page: Page, value: number, _human: HumanCursor) {
       }));
       lastVia = dom.via;
       lastDetail = dom.detail || "";
+      await sleep(rand(350, 650));
 
-      // Poll — radiogroup data-rating đổi 0→N sau click
+      // Poll ngắn — radiogroup data-rating đổi 0→N sau click
       selected =
-        (await waitSelectedRating(frame, rating, 2800)) ??
+        (await waitSelectedRating(frame, rating, 1200)) ??
         (await readSelectedRating(frame)) ??
         dom.selected;
       if (selected === rating) {
@@ -1064,7 +1097,10 @@ async function selectStar(page: Page, value: number, _human: HumanCursor) {
       // Đọc thẳng radiogroup (Maps VI hay set đúng dù aria-checked trống)
       const groupVal = await frame
         .evaluate(() => {
-          const g = document.querySelector('[role="radiogroup"]');
+          const g =
+            document.querySelector(
+              '[role="radiogroup"][aria-label*="Xếp hạng" i], [role="radiogroup"][aria-label*="star" i], div.lv4IMd[role="radiogroup"]',
+            ) || document.querySelector('[role="radiogroup"]');
           if (!g) return -1;
           const v = Number(
             g.getAttribute("data-rating") ||
@@ -1082,29 +1118,23 @@ async function selectStar(page: Page, value: number, _human: HumanCursor) {
         return;
       }
 
-      // Đã click đúng aria-label VI (Một/…/Năm sao) — chấp nhận sớm
-      if (dom.ok && /aria-vi/i.test(dom.via) && dom.detail) {
-        if (selected != null && selected >= 1 && selected <= 5 && selected === rating) {
-          console.log(
-            `[maps-review] chọn ${rating}★ OK via=${dom.via} selected=${selected}`,
-          );
-          return;
-        }
-        // attempt≥1: đã bấm nhãn VI rõ ràng — tin (tránh loop đóng/mở modal)
-        if (attempt >= 1) {
-          console.warn(
-            `[maps-review] chọn ${rating}★ TRUST "${dom.detail}" (readSelected=${selected}, group=${groupVal})`,
-          );
-          return;
-        }
-        console.warn(
-          `[maps-review] sau ${dom.via} selected=${selected} group=${groupVal}, muốn ${rating} — thử lại`,
-        );
-      }
-
+      // Click chắc (aria-vi / data-rating / …): tin sau 1–2 lần — không chờ 3 vòng
       if (dom.ok && CONFIDENT_STAR_VIA.test(dom.via)) {
+        confidentHits += 1;
+        if (confidentHits >= 1 && /aria-vi|data-rating/i.test(dom.via)) {
+          console.log(
+            `[maps-review] chọn ${rating}★ OK trust-via=${dom.via} (hits=${confidentHits}, selected=${selected}, group=${groupVal})`,
+          );
+          return;
+        }
+        if (confidentHits >= 2) {
+          console.log(
+            `[maps-review] chọn ${rating}★ OK trust-via=${dom.via} (hits=${confidentHits}, selected=${selected})`,
+          );
+          return;
+        }
         console.warn(
-          `[maps-review] click ${dom.via} nhưng selected=${selected} ≠ ${rating} — thử tiếp`,
+          `[maps-review] click ${dom.via} selected=${selected} group=${groupVal} — hit ${confidentHits}/2`,
         );
       }
 
@@ -1115,52 +1145,14 @@ async function selectStar(page: Page, value: number, _human: HumanCursor) {
             (VI_STAR_ARIA[rating] || [])
               .map((l) => `[aria-label="${l}"]`)
               .concat([
-                `[data-rating="${rating}"]`,
+                `div.s2xyy[role="radio"][data-rating="${rating}"]`,
+                `[role="radio"][data-rating="${rating}"]`,
                 `[role="radio"][aria-posinset="${rating}"]`,
                 `[aria-label="${rating} sao"]`,
                 `[aria-label="${rating} stars"]`,
               ])
               .join(", "),
           )) || null;
-        // Không lấy theo index [rating-1] trên mọi radio — dễ click nhầm nút khác
-        if (!handle) {
-          const radios = await frame.$$(
-            '[role="radiogroup"] [role="radio"], [role="radiogroup"] [data-rating], div[role="radiogroup"] button',
-          );
-          if (radios.length >= rating) {
-            const candidate = radios[rating - 1]!;
-            const label = await candidate.evaluate(
-              (el) =>
-                (el.getAttribute("aria-label") || "") +
-                " " +
-                (el.getAttribute("data-rating") || ""),
-            );
-            if (
-              !label.trim() ||
-              new RegExp(`${rating}\\s*(sao|star)|data-rating.?${rating}|^\\s*${rating}\\s*$`, "i").test(
-                label,
-              ) ||
-              radios.length === 5
-            ) {
-              const box = await candidate.boundingBox();
-              if (box && box.width > 2 && box.height > 2) {
-                await page.mouse.click(
-                  box.x + box.width / 2,
-                  box.y + box.height / 2,
-                  { delay: 70 },
-                );
-                await sleep(rand(400, 700));
-                selected = await readSelectedRating(frame);
-                if (selected === rating) {
-                  console.log(
-                    `[maps-review] chọn ${rating}★ OK (radiogroup mouse, attempt=${attempt + 1})`,
-                  );
-                  return;
-                }
-              }
-            }
-          }
-        }
         if (handle) {
           const box = await handle.boundingBox();
           if (box && box.width > 2 && box.height > 2) {
@@ -1183,9 +1175,13 @@ async function selectStar(page: Page, value: number, _human: HumanCursor) {
               );
               return;
             }
-            console.warn(
-              `[maps-review] mouse click sao nhưng selected=${selected} ≠ ${rating}`,
-            );
+            confidentHits += 1;
+            if (confidentHits >= 2) {
+              console.log(
+                `[maps-review] chọn ${rating}★ OK trust-mouse (hits=${confidentHits})`,
+              );
+              return;
+            }
           }
         }
       } catch {
@@ -1203,14 +1199,11 @@ async function selectStar(page: Page, value: number, _human: HumanCursor) {
           );
         })
         .catch(() => false);
-      if (postEnabled) {
-        selected = await readSelectedRating(frame);
-        if (selected === rating) {
-          console.log(
-            `[maps-review] chọn ${rating}★ — Đăng enable + selected verified`,
-          );
-          return;
-        }
+      if (postEnabled && (dom.ok || confidentHits >= 1)) {
+        console.log(
+          `[maps-review] chọn ${rating}★ — Đăng đã enable (via=${dom.via})`,
+        );
+        return;
       }
     }
 
@@ -1371,10 +1364,12 @@ async function enterReview(frame: Frame, text: string, human: HumanCursor) {
 async function enterReviewInFrame(frame: Frame, body: string, human: HumanCursor) {
   const selectors = [
     'textarea[aria-label="Nhập bài đánh giá"]',
+    'textarea[jsname="YPqjbf"]',
+    'textarea[placeholder*="trải nghiệm" i]',
+    'textarea[placeholder*="Mô tả cụ thể" i]',
     'textarea[aria-label*="đánh giá" i]',
     'textarea[aria-label*="review" i]',
     'textarea[aria-label*="Mô tả" i]',
-    'textarea[placeholder*="trải nghiệm" i]',
     'textarea[placeholder*="Mô tả" i]',
     'textarea[placeholder*="experience" i]',
     'textarea[placeholder*="Share" i]',
@@ -1392,7 +1387,7 @@ async function enterReviewInFrame(frame: Frame, body: string, human: HumanCursor
       .evaluate(
         () =>
           !!document.querySelector(
-            'textarea, div[contenteditable="true"], div[role="textbox"]',
+            'textarea[aria-label="Nhập bài đánh giá"], textarea[jsname="YPqjbf"], textarea, div[contenteditable="true"], div[role="textbox"]',
           ),
       )
       .catch(() => false);
@@ -1426,8 +1421,7 @@ async function enterReviewInFrame(frame: Frame, body: string, human: HumanCursor
     }
     if (!el) continue;
 
-    // 1) Focus bằng JS trước — bàn phím gõ được kể cả khi có lớp phủ che (overlay
-    //    chỉ chặn click chuột, không chặn keyboard vào element đang focus).
+    // 1) Focus bằng JS
     await frame
       .evaluate((s) => {
         const ta = document.querySelector(s) as HTMLTextAreaElement | null;
@@ -1438,39 +1432,46 @@ async function enterReviewInFrame(frame: Frame, body: string, human: HumanCursor
       }, sel)
       .catch(() => undefined);
 
-    // 2) Vẫn di chuột như người (best effort) rồi focus lại (phòng click trúng overlay)
+    // 2) Di chuột như người rồi focus lại
     await human.moveToElement(el).catch(() => undefined);
-    await human.pause(80, 200);
+    await human.pause(120, 280);
     await frame
       .evaluate((s) => (document.querySelector(s) as HTMLElement | null)?.focus(), sel)
       .catch(() => undefined);
 
-    // 3) Xóa nội dung cũ + gõ từng ký tự (nhịp người, bài dài gõ nhanh hơn,
-    //    có deadline cứng — quá hạn thì dừng gõ và set thẳng value)
+    // 3) Gõ tay tốc độ random (khôi phục nhịp humanize — không tăng tốc bài dài)
     const page = frame.page();
     await page.keyboard.down("Control");
     await page.keyboard.press("KeyA");
     await page.keyboard.up("Control");
-    await sleep(rand(120, 260));
+    await sleep(rand(120, 280));
     await page.keyboard.press("Backspace");
-    await sleep(rand(150, 320));
-    const speed = body.length > 160 ? 0.45 : body.length > 90 ? 0.7 : 1;
-    const typingDeadline = Date.now() + 90_000;
+    await sleep(rand(150, 350));
+
+    // Ưu tiên human.typeIntoElement (random đầy đủ); fallback vòng gõ tay tương đương
     let typedAll = true;
-    for (let i = 0; i < body.length; i++) {
-      if (Date.now() > typingDeadline) {
-        console.warn(
-          "[maps-review] gõ quá 90s — dừng gõ tay, set thẳng nội dung",
-        );
-        typedAll = false;
-        break;
+    try {
+      await human.typeIntoElement(el, body);
+    } catch {
+      const typingDeadline = Date.now() + 180_000;
+      for (let i = 0; i < body.length; i++) {
+        if (Date.now() > typingDeadline) {
+          console.warn("[maps-review] gõ quá 180s — dừng gõ tay, set thẳng nội dung");
+          typedAll = false;
+          break;
+        }
+        const ch = body[i]!;
+        await page.keyboard.type(ch, { delay: 0 });
+        let delay = rand(120, 280);
+        if (" .,!?;:\n".includes(ch)) delay += rand(80, 220);
+        if (".@_".includes(ch)) delay += rand(60, 160);
+        if (i > 0 && i % randInt(5, 12) === 0) delay += rand(200, 550);
+        if (body.length > 40 && i === Math.floor(body.length / 2)) {
+          delay += rand(300, 700);
+        }
+        await sleep(delay);
       }
-      const ch = body[i]!;
-      await page.keyboard.type(ch, { delay: 0 });
-      let delay = rand(90, 220);
-      if (" .,!?;:\n".includes(ch)) delay += rand(60, 180);
-      if (i > 0 && i % randInt(6, 12) === 0) delay += rand(150, 420);
-      await sleep(delay * speed);
+      await sleep(rand(280, 650));
     }
 
     await frame
@@ -1484,11 +1485,11 @@ async function enterReviewInFrame(frame: Frame, body: string, human: HumanCursor
     await sleep(rand(300, 600));
 
     if (typedAll && (await filledLen(sel)) >= minFilled) {
-      console.log(`[maps-review] đã nhập bình luận (gõ tay, focus JS)`);
+      console.log(`[maps-review] đã nhập bình luận (gõ tay random)`);
       return true;
     }
 
-    // 4) Fallback cuối: set value trực tiếp (textarea hoặc contenteditable)
+    // 4) Fallback cuối: set value trực tiếp
     await frame
       .evaluate(
         (s, val) => {
@@ -1564,12 +1565,20 @@ async function waitPostButtonEnabled(frame: Frame, rating: number, timeoutMs = 4
   return false;
 }
 
-/** Cuộn form/iframe để nút Đăng nằm trong vùng nhìn thấy (ưu tiên cuộn lên/vào giữa). */
+/** Cuộn form/iframe để nút Đăng (jsname=IJM3w) lộ ra — footer .CjDtQ / .kEocrb. */
 async function scrollPostButtonIntoView(frame: Frame) {
   await frame.evaluate(() => {
-    const btn = document.querySelector('button[jsname="IJM3w"]') as HTMLElement | null;
+    const btn =
+      (document.querySelector('button[jsname="IJM3w"]') as HTMLElement | null) ||
+      ([...document.querySelectorAll("button")].find((b) =>
+        /^Đăng$/i.test(
+          (b.querySelector('[jsname="V67aGc"]')?.textContent || b.textContent || "").trim(),
+        ),
+      ) as HTMLElement | undefined) ||
+      null;
     if (!btn) return;
 
+    // Cuộn mọi ancestor overflow trước
     let node: HTMLElement | null = btn;
     while (node) {
       const style = window.getComputedStyle(node);
@@ -1580,37 +1589,95 @@ async function scrollPostButtonIntoView(frame: Frame) {
       ) {
         const nr = node.getBoundingClientRect();
         const br = btn.getBoundingClientRect();
-        const delta = br.top - nr.top - nr.height * 0.55;
-        node.scrollTop += delta;
+        node.scrollTop += br.top - nr.top - nr.height * 0.4;
       }
       node = node.parentElement;
     }
 
+    // Footer chứa Huỷ / Đăng
+    const footer =
+      (btn.closest(".CjDtQ, .LxeJme, .kEocrb") as HTMLElement | null) ||
+      (document.querySelector(".CjDtQ.LxeJme") as HTMLElement | null);
+    footer?.scrollIntoView({ block: "end", inline: "nearest", behavior: "instant" as ScrollBehavior });
     btn.scrollIntoView({
       block: "center",
       inline: "nearest",
       behavior: "instant" as ScrollBehavior,
     });
   });
-  await sleep(rand(250, 450));
+  await sleep(rand(200, 350));
 
   const page = frame.page();
-  // Cuộn chuột lên để lộ footer Đăng (không cuộn xuống trước)
-  await page.mouse.wheel({ deltaY: -220 }).catch(() => undefined);
-  await sleep(180);
-  await page.mouse.wheel({ deltaY: -120 }).catch(() => undefined);
-  await sleep(220);
+  // Cuộn chuột: xuống một chút rồi lên để lộ thanh Đăng (như thao tác tay)
+  await page.mouse.wheel({ deltaY: 180 }).catch(() => undefined);
+  await sleep(120);
+  await page.mouse.wheel({ deltaY: -280 }).catch(() => undefined);
+  await sleep(150);
+  await page.mouse.wheel({ deltaY: -160 }).catch(() => undefined);
+  await sleep(200);
 }
 
 async function clickPostButton(frame: Frame, human: HumanCursor) {
-  const handle = await frame.$('button[jsname="IJM3w"]');
-  if (!handle) throw new Error("Không tìm thấy button[jsname=IJM3w]");
-  const box = await handle.boundingBox();
-  if (!box || box.height < 2 || box.width < 2) {
-    return false;
+  // DOM chuẩn Maps VI: button[jsname=IJM3w] > span[jsname=V67aGc] "Đăng"
+  let handle =
+    (await frame.$('button[jsname="IJM3w"]')) ||
+    (await frame.$('button.nCP5yc[jsname="IJM3w"]'));
+  if (!handle) {
+    // Fallback theo text
+    const handles = await frame.$$("button");
+    for (const h of handles) {
+      const t = await h
+        .evaluate(
+          (el) =>
+            (
+              el.querySelector('[jsname="V67aGc"]')?.textContent ||
+              el.textContent ||
+              ""
+            ).trim(),
+        )
+        .catch(() => "");
+      if (/^Đăng$/i.test(t)) {
+        handle = h;
+        break;
+      }
+    }
   }
-  await human.clickElement(handle);
-  return true;
+  if (!handle) throw new Error("Không tìm thấy nút Đăng (jsname=IJM3w)");
+
+  await scrollPostButtonIntoView(frame);
+  const box = await handle.boundingBox();
+  if (box && box.height >= 2 && box.width >= 2) {
+    try {
+      await human.clickElement(handle);
+      return true;
+    } catch {
+      /* fallback evaluate */
+    }
+    await frame.page().mouse.click(box.x + box.width / 2, box.y + box.height / 2, {
+      delay: 60,
+    });
+    return true;
+  }
+
+  // Nút ngoài viewport / box null — click DOM trực tiếp
+  const clicked = await frame.evaluate(() => {
+    const btn =
+      (document.querySelector('button[jsname="IJM3w"]') as HTMLElement | null) ||
+      ([...document.querySelectorAll("button")].find((b) =>
+        /^Đăng$/i.test(
+          (b.querySelector('[jsname="V67aGc"]')?.textContent || b.textContent || "").trim(),
+        ),
+      ) as HTMLElement | undefined);
+    if (!btn) return false;
+    btn.scrollIntoView({ block: "center", inline: "nearest" });
+    btn.focus();
+    btn.click();
+    btn.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, cancelable: true, view: window }),
+    );
+    return true;
+  });
+  return clicked;
 }
 
 /** Nút Đăng có thể nằm ở frame khác sau khi form đổi bước — tìm đúng frame trước. */
@@ -1636,21 +1703,29 @@ async function submitReview(frame: Frame, rating: number, human: HumanCursor) {
 
   await dismissCancelReviewPrompt(frame);
 
-  await clickPostButton(frame, human);
-  console.log("[maps-review] bấm Đăng lần 1");
-  await sleep(rand(280, 520));
-
+  // Cuộn lộ footer Huỷ/Đăng TRƯỚC khi bấm
   await scrollPostButtonIntoView(frame);
-  await dismissCancelReviewPrompt(frame);
+  await sleep(rand(200, 400));
 
-  const ok = await clickPostButton(frame, human);
-  if (!ok) {
+  const ok1 = await clickPostButton(frame, human);
+  console.log(`[maps-review] bấm Đăng lần 1 ok=${ok1}`);
+  await sleep(rand(400, 700));
+
+  // Nếu form còn (chưa sang thank-you) → cuộn lại và bấm lần 2
+  const stillOpen = await frame
+    .$('button[jsname="IJM3w"], textarea, [aria-label*="Nhập bài đánh giá" i]')
+    .catch(() => null);
+  if (stillOpen) {
     await scrollPostButtonIntoView(frame);
-    if (!(await clickPostButton(frame, human))) {
-      throw new Error("Nút Đăng không click được sau khi cuộn");
+    await dismissCancelReviewPrompt(frame);
+    const ok2 = await clickPostButton(frame, human);
+    console.log(`[maps-review] bấm Đăng lần 2 (sau cuộn) ok=${ok2}`);
+    if (!ok2) {
+      await scrollPostButtonIntoView(frame);
+      const ok3 = await clickPostButton(frame, human);
+      if (!ok3) throw new Error("Nút Đăng không click được sau khi cuộn");
     }
   }
-  console.log("[maps-review] đã bấm Đăng lần 2 (sau cuộn)");
 
   await sleep(500);
   if (await dismissCancelReviewPrompt(frame)) {
@@ -1660,40 +1735,269 @@ async function submitReview(frame: Frame, rating: number, human: HumanCursor) {
   }
 }
 
-async function countReviewPhotos(frame: Frame) {
+async function countReviewPhotos(frame: Frame): Promise<number> {
   try {
     return await frame.evaluate(() => {
-      const root =
-        (document.querySelector('[role="dialog"], [aria-modal="true"]') as HTMLElement | null) ||
-        document.body;
-      const byId = root.querySelectorAll("[data-photo-id]").length;
-      if (byId > 0) return byId;
-
-      // Thumbnail sau upload: nhiều class Maps / lgbiNe / ảnh blob
-      const thumbs = root.querySelectorAll(
-        '[data-photo-id], div[style*="background-image"][style*="blob"], div[style*="googleusercontent"], img[src*="googleusercontent"], img[src*="blob:"], img[src^="data:image"], img[src*="lh3.google"]',
-      );
-      let n = 0;
-      for (const el of Array.from(thumbs)) {
-        const r = (el as HTMLElement).getBoundingClientRect();
-        if (r.width >= 36 && r.height >= 36 && r.bottom > 0 && r.right > 0) n += 1;
+      const roots: ParentNode[] = [];
+      for (const s of [
+        '[role="dialog"]',
+        '[aria-modal="true"]',
+        'form',
+        'body',
+      ]) {
+        for (const el of Array.from(document.querySelectorAll(s))) {
+          if (!roots.includes(el)) roots.push(el);
+        }
       }
-      if (n > 0) return n;
+      if (!roots.includes(document.body)) roots.push(document.body);
 
+      const visible = (el: Element, min = 16) => {
+        const r = (el as HTMLElement).getBoundingClientRect();
+        return (
+          r.width >= min &&
+          r.height >= min &&
+          r.bottom > 0 &&
+          r.right > 0 &&
+          r.top < (window.innerHeight || 2000) &&
+          r.left < (window.innerWidth || 2000)
+        );
+      };
+
+      const isAddPhotoLabel = (t: string) =>
+        /Thêm ảnh|Add photo|Add photos|ảnh và video|Add videos/i.test(t);
+
+      // 1) data-photo-id (Maps chuẩn)
+      let best = 0;
+      for (const root of roots) {
+        const byId = (root as ParentNode).querySelectorAll("[data-photo-id]").length;
+        if (byId > best) best = byId;
+      }
+      if (best > 0) return best;
+
+      // 2) Nút Xóa / Remove / Gỡ trên thumbnail (Maps VI hay dùng nhiều nhãn)
+      const removeRe =
+        /^(Xóa|Xoá|Gỡ|Remove|Delete|Close)?\s*(ảnh|photo|hình|image|video)?$/i;
+      const removeLoose =
+        /Xóa ảnh|Xoá ảnh|Gỡ ảnh|Remove photo|Delete photo|Remove image|Xóa hình|Close photo|Bỏ ảnh/i;
+      const removeBtns = Array.from(
+        document.querySelectorAll(
+          "button, [role='button'], div[aria-label], span[aria-label], [jsaction]",
+        ),
+      ).filter((el) => {
+        if (!visible(el, 8)) return false;
+        const label = (
+          (el.getAttribute("aria-label") || "") +
+          " " +
+          (el.getAttribute("title") || "") +
+          " " +
+          (el.getAttribute("data-tooltip") || "")
+        ).trim();
+        if (!label) return false;
+        if (isAddPhotoLabel(label)) return false;
+        return removeLoose.test(label) || removeRe.test(label);
+      });
+      if (removeBtns.length > best) best = removeBtns.length;
+      if (best > 0) return best;
+
+      // 3) Vùng gần nút "Thêm ảnh và video": đếm ô thumbnail (có X / img / bg)
+      const addNodes = Array.from(
+        document.querySelectorAll(
+          'div[jsname="kZV5qc"], div.nNzjpf-cS4Vcb-PvZLI-Ueh9jd-haAclf, button, div[role="button"], div[jsname]',
+        ),
+      ).filter((el) => {
+        const t =
+          ((el as HTMLElement).getAttribute("aria-label") || "") +
+          " " +
+          ((el as HTMLElement).textContent || "");
+        return isAddPhotoLabel(t);
+      }) as HTMLElement[];
+
+      for (const add of addNodes) {
+        // Leo lên vài cấp để lấy hàng thumbnail + nút Thêm ảnh
+        let section: HTMLElement | null = add;
+        for (let i = 0; i < 6 && section; i++) {
+          const kids = Array.from(section.children) as HTMLElement[];
+          const tiles = kids.filter((k) => {
+            if (k === add || k.contains(add)) return false;
+            const t =
+              (k.getAttribute("aria-label") || "") + " " + (k.textContent || "");
+            if (isAddPhotoLabel(t)) return false;
+            const r = k.getBoundingClientRect();
+            // Thumbnail Maps thường ~48–200px
+            if (r.width < 36 || r.height < 36 || r.width > 280 || r.height > 280) {
+              return false;
+            }
+            if (!visible(k, 36)) return false;
+            const hasMedia =
+              !!k.querySelector(
+                "img, canvas, video, [style*='background-image'], [data-photo-id]",
+              ) ||
+              /url\(/i.test(k.getAttribute("style") || "") ||
+              !!k.querySelector(
+                "button, [role='button'], [aria-label*='Xóa' i], [aria-label*='Remove' i], [aria-label*='Gỡ' i]",
+              );
+            // Ô vuông/chữ nhật gần nhau trong hàng ảnh
+            const ratio = r.width / Math.max(1, r.height);
+            return hasMedia || (ratio > 0.55 && ratio < 1.8);
+          });
+          if (tiles.length > best) best = tiles.length;
+
+          // Đếm img / canvas trực tiếp trong section
+          const medias = Array.from(
+            section.querySelectorAll(
+              "img, canvas, video, [data-photo-id], div[style*='background-image']",
+            ),
+          ).filter((el) => {
+            if (!visible(el, 36)) return false;
+            const r = (el as HTMLElement).getBoundingClientRect();
+            if (r.width > 280 || r.height > 280) return false;
+            // Bỏ icon nhỏ / avatar siêu nhỏ
+            if (r.width < 40 || r.height < 40) return false;
+            const src =
+              (el as HTMLImageElement).src ||
+              el.getAttribute("src") ||
+              el.getAttribute("style") ||
+              "";
+            // Bỏ logo/star icon chung nếu quá nhỏ đã lọc
+            if (/maps\/vt|gstatic\.com\/images\/branding|favicon/i.test(src)) {
+              return false;
+            }
+            return true;
+          });
+          // Unique by gần vị trí
+          const uniq: Element[] = [];
+          for (const m of medias) {
+            const r = (m as HTMLElement).getBoundingClientRect();
+            if (
+              uniq.some((u) => {
+                const ur = (u as HTMLElement).getBoundingClientRect();
+                return Math.abs(ur.left - r.left) < 12 && Math.abs(ur.top - r.top) < 12;
+              })
+            ) {
+              continue;
+            }
+            uniq.push(m);
+          }
+          if (uniq.length > best) best = uniq.length;
+          section = section.parentElement;
+        }
+      }
+      if (best > 0) return best;
+
+      // 4) Fallback toàn form: img blob/googleusercontent kích thước thumbnail
       const imgs = Array.from(
-        root.querySelectorAll(
-          'img[src*="googleusercontent"], img[src*="blob:"], img[src^="data:"], img[src*="lh3.google"]',
+        document.querySelectorAll(
+          'img[src*="blob:"], img[src^="data:image"], img[src*="googleusercontent"], img[src*="lh3.google"], img[src*="ggpht"], img[src*="google.com"]',
         ),
       ) as HTMLImageElement[];
-      const previews = imgs.filter((img) => {
+      const previewImgs = imgs.filter((img) => {
+        if (!visible(img, 40)) return false;
         const r = img.getBoundingClientRect();
-        return r.width >= 36 && r.height >= 36 && r.bottom > 0 && r.right > 0;
+        return r.width <= 260 && r.height <= 260;
       });
-      return previews.length;
+      if (previewImgs.length > best) best = previewImgs.length;
+
+      // 5) Nút X nhỏ góc thumbnail (không có aria) — đếm cụm ô cạnh Thêm ảnh theo vị trí
+      if (addNodes[0]) {
+        const addBox = addNodes[0].getBoundingClientRect();
+        const candidates = Array.from(
+          document.querySelectorAll("div, button, span, img, canvas"),
+        ).filter((el) => {
+          if (addNodes.some((a) => a === el || a.contains(el))) return false;
+          const r = (el as HTMLElement).getBoundingClientRect();
+          if (r.width < 48 || r.height < 48 || r.width > 220 || r.height > 220) {
+            return false;
+          }
+          // Cùng hàng / gần nút Thêm ảnh (thường bên trái hoặc cùng strip)
+          const sameRow = Math.abs(r.top - addBox.top) < 80;
+          const near =
+            r.bottom > addBox.top - 40 &&
+            r.top < addBox.bottom + 120 &&
+            r.right > 0;
+          if (!sameRow && !near) return false;
+          const ratio = r.width / Math.max(1, r.height);
+          return ratio > 0.5 && ratio < 2.2;
+        });
+        // Dedup overlapping
+        const tiles: DOMRect[] = [];
+        for (const el of candidates) {
+          const r = (el as HTMLElement).getBoundingClientRect();
+          if (
+            tiles.some(
+              (t) => Math.abs(t.left - r.left) < 20 && Math.abs(t.top - r.top) < 20,
+            )
+          ) {
+            continue;
+          }
+          tiles.push(r);
+        }
+        if (tiles.length > best) best = tiles.length;
+      }
+
+      return best;
     });
   } catch {
     return 0;
   }
+}
+
+/** Dump DOM ảnh để debug khi đếm = 0 dù đã accept file. */
+async function dumpPhotoDom(page: Page, frame: Frame) {
+  const dumps: unknown[] = [];
+  const frames = [
+    ...new Set([frame, page.mainFrame(), ...(await reviewFormFrames(page, frame))]),
+  ];
+  for (const ctx of [...frames, ...page.frames()].slice(0, 12)) {
+    const dump = await ctx
+      .evaluate(() => {
+        const labels = Array.from(document.querySelectorAll("[aria-label]"))
+          .map((el) => el.getAttribute("aria-label") || "")
+          .filter((t) => /ảnh|photo|image|xóa|remove|gỡ|thêm/i.test(t))
+          .slice(0, 12);
+        const imgs = Array.from(document.querySelectorAll("img"))
+          .map((img) => {
+            const r = img.getBoundingClientRect();
+            return {
+              w: Math.round(r.width),
+              h: Math.round(r.height),
+              src: (img.src || "").slice(0, 60),
+            };
+          })
+          .filter((x) => x.w >= 20 && x.h >= 20)
+          .slice(0, 10);
+        return {
+          url: location.href.slice(0, 90),
+          photoIds: document.querySelectorAll("[data-photo-id]").length,
+          addBtn: !!document.querySelector(
+            'div[jsname="kZV5qc"], div.nNzjpf-cS4Vcb-PvZLI-Ueh9jd-haAclf',
+          ),
+          fileInputs: document.querySelectorAll('input[type="file"]').length,
+          labels,
+          imgs,
+        };
+      })
+      .catch(() => null);
+    if (dump) dumps.push(dump);
+  }
+  console.warn(`[maps-review] photo-dom dump: ${JSON.stringify(dumps).slice(0, 1800)}`);
+}
+
+/** Đếm ảnh trên mọi frame (form + main + WriteWidget). */
+async function countReviewPhotosAnywhere(page: Page, prefer?: Frame | null) {
+  let best = 0;
+  const seen = new Set<Frame>();
+  const tryOne = async (ctx: Frame) => {
+    if (seen.has(ctx)) return;
+    seen.add(ctx);
+    const n = await countReviewPhotos(ctx).catch(() => 0);
+    if (n > best) best = n;
+  };
+  if (prefer) await tryOne(prefer);
+  for (const ctx of await reviewFormFrames(page, prefer)) await tryOne(ctx);
+  await tryOne(page.mainFrame());
+  // Quét mọi frame — thumbnail đôi khi nằm frame khác WriteWidget
+  for (const ctx of page.frames()) await tryOne(ctx);
+  return best;
 }
 
 /** Frame form review — ưu tiên widget WriteWidget / có textarea. */
@@ -1709,48 +2013,103 @@ async function reviewFormFrames(page: Page, prefer?: Frame | null): Promise<Fram
     .sort((a, b) => b.score - a.score)
     .map(({ frame }) => frame);
   if (prefer && !ordered.includes(prefer)) ordered.unshift(prefer);
+  // Luôn thử cả WriteWidget / bscframe dù score thấp
+  for (const f of page.frames()) {
+    if (/LoadWriteWidget|writereview|WriteWidget|bscframe/i.test(f.url() || "")) {
+      if (!ordered.includes(f)) ordered.push(f);
+    }
+  }
   return [...new Set(ordered)];
 }
 
-async function clickAddPhotoButton(frame: Frame, page: Page, human: HumanCursor) {
+async function clickAddPhotoButton(frame: Frame, page: Page, human?: HumanCursor) {
   for (const ctx of await reviewFormFrames(page, frame)) {
-    const handle = await ctx
-      .$(
-        'div.nNzjpf-cS4Vcb-PvZLI-Ueh9jd-haAclf, button[aria-label*="Thêm ảnh" i], button[aria-label*="Add photo" i], button[aria-label*="Add photos" i]',
-      )
-      .catch(() => null);
-    if (handle) {
-      await human.clickElement(handle).catch(() => undefined);
-      console.log("[maps-review] đã bấm Thêm ảnh");
-      await sleep(rand(400, 700));
-      return true;
-    }
+    // DOM chuẩn: div[jsname=kZV5qc] > div.nNzjpf-…-haAclf — text "Thêm ảnh và video"
     const clicked = await ctx
       .evaluate(() => {
-        const btn = [...document.querySelectorAll("button, div[role='button']")].find(
-          (b) => /Thêm ảnh|Add photo|Add photos|Thêm hình/i.test(b.textContent || ""),
-        ) as HTMLElement | undefined;
-        if (!btn) return false;
+        const sels = [
+          'div[jsname="kZV5qc"]',
+          "div.nNzjpf-cS4Vcb-PvZLI-Ueh9jd-haAclf",
+          'div.jJtFZe[jsname="kZV5qc"]',
+          'button[aria-label*="Thêm ảnh" i]',
+          'button[aria-label*="Add photo" i]',
+          'button[aria-label*="Add photos" i]',
+          '[role="button"][aria-label*="Thêm ảnh" i]',
+        ];
+        for (const s of sels) {
+          const el = document.querySelector(s) as HTMLElement | null;
+          if (!el) continue;
+          const t = (el.getAttribute("aria-label") || "") + " " + (el.textContent || "");
+          if (
+            /Thêm ảnh|Add photo|ảnh và video|Add photos|Add videos/i.test(t) ||
+            s.includes("kZV5qc") ||
+            s.includes("haAclf")
+          ) {
+            el.scrollIntoView({ block: "center", inline: "nearest" });
+            el.click();
+            return s;
+          }
+        }
+        const btn = [...document.querySelectorAll("button, div[role='button'], div[jsname]")]
+          .find((b) =>
+            /Thêm ảnh và video|Thêm ảnh|Add photos? and videos?|Add photo/i.test(
+              ((b as HTMLElement).getAttribute("aria-label") || "") +
+                " " +
+                ((b as HTMLElement).textContent || ""),
+            ),
+          ) as HTMLElement | undefined;
+        if (!btn) return null;
         btn.scrollIntoView({ block: "center", inline: "nearest" });
         btn.click();
-        return true;
+        return "text-Thêm ảnh và video";
       })
-      .catch(() => false);
+      .catch(() => null);
     if (clicked) {
-      console.log("[maps-review] đã bấm Thêm ảnh (text fallback)");
-      await sleep(rand(400, 700));
+      console.log(`[maps-review] đã bấm Thêm ảnh (${clicked})`);
+      await sleep(rand(350, 600));
+      await ctx
+        .evaluate(() => {
+          const item = [
+            ...document.querySelectorAll(
+              "button, div[role='menuitem'], div[role='button'], span",
+            ),
+          ].find((b) =>
+            /^(Tải lên|Upload|Browse|Từ máy tính|From (your )?device|Chọn tệp|Choose file)/i.test(
+              ((b as HTMLElement).textContent || "").trim(),
+            ),
+          ) as HTMLElement | undefined;
+          item?.click();
+          return !!item;
+        })
+        .catch(() => false);
       return true;
+    }
+    if (human) {
+      const handle = await ctx
+        .$(
+          'div[jsname="kZV5qc"], div.nNzjpf-cS4Vcb-PvZLI-Ueh9jd-haAclf, button[aria-label*="Thêm ảnh" i]',
+        )
+        .catch(() => null);
+      if (handle) {
+        await human.clickElement(handle).catch(() => undefined);
+        console.log("[maps-review] đã bấm Thêm ảnh (mouse)");
+        await sleep(rand(400, 700));
+        return true;
+      }
     }
   }
   return false;
 }
 
 async function findImageFileInput(frame: Frame, page: Page) {
-  for (const ctx of await reviewFormFrames(page, frame)) {
-    try {
-      const inputs = await ctx.$$('input[type="file"]');
-      for (const input of inputs) {
-        const meta = await ctx.evaluate((el) => {
+  const tryFrame = async (ctx: Frame) => {
+    const inputs = await ctx.$$('input[type="file"]');
+    for (const input of inputs) {
+      const meta = await ctx
+        .evaluate((el) => {
+          if (el.getAttribute("data-binhluan-upload") === "1") {
+            return { ok: false, multiple: false, accept: "" };
+          }
           const accept = (el.getAttribute("accept") || "").toLowerCase();
           const acceptOk =
             !accept ||
@@ -1760,44 +2119,30 @@ async function findImageFileInput(frame: Frame, page: Page) {
             accept.includes("jpeg") ||
             accept.includes("png") ||
             accept.includes("webp") ||
-            accept.includes("heic");
-          // Maps hay để input display:none + size 0 — vẫn uploadFile được
+            accept.includes("heic") ||
+            accept.includes("video");
           return {
             ok: acceptOk,
             multiple: el.hasAttribute("multiple"),
             accept,
           };
-        }, input);
-        if (meta.ok) {
-          console.log(
-            `[maps-review] tìm thấy input[type=file] accept=${meta.accept || "(any)"} multiple=${meta.multiple}`,
-          );
-          return { input, multiple: meta.multiple, frame: ctx };
-        }
+        }, input)
+        .catch(() => null);
+      if (meta?.ok) {
+        return { input, multiple: meta.multiple, frame: ctx, accept: meta.accept };
       }
-    } catch {
-      /* ignore */
     }
-  }
-  // Fallback: mọi frame (kể cả score thấp / bscframe)
-  for (const ctx of page.frames()) {
+    return null;
+  };
+
+  for (const ctx of await reviewFormFrames(page, frame)) {
     try {
-      const inputs = await ctx.$$('input[type="file"]');
-      for (const input of inputs) {
-        const accept = await input.evaluate((el) =>
-          (el.getAttribute("accept") || "").toLowerCase(),
-        );
-        if (
-          accept &&
-          !/image|\*|jfif|jpeg|png|webp|heic|video/i.test(accept)
-        ) {
-          continue;
-        }
+      const hit = await tryFrame(ctx);
+      if (hit) {
         console.log(
-          `[maps-review] input[type=file] fallback frame=${ctx.url().slice(0, 60)} accept=${accept || "(any)"}`,
+          `[maps-review] tìm thấy input[type=file] accept=${hit.accept || "(any)"} multiple=${hit.multiple}`,
         );
-        const multiple = await input.evaluate((el) => el.hasAttribute("multiple"));
-        return { input, multiple, frame: ctx };
+        return hit;
       }
     } catch {
       /* ignore */
@@ -1806,34 +2151,37 @@ async function findImageFileInput(frame: Frame, page: Page) {
   return null;
 }
 
-/** Chờ preview ảnh xuất hiện sau upload. */
+/** Chờ preview ảnh — timeout ngắn; FileChooser accept mới là nguồn tin chính. */
 async function waitPhotoPreviewIncrease(
   page: Page,
   frame: Frame,
   beforeCount: number,
   minAdded = 1,
-  timeoutMs = 30_000,
+  timeoutMs = 18_000,
 ) {
   const start = Date.now();
+  let last = beforeCount;
   while (Date.now() - start < timeoutMs) {
-    for (const ctx of await reviewFormFrames(page, frame)) {
-      const count = await countReviewPhotos(ctx);
-      if (count >= beforeCount + minAdded) return { ok: true as const, count, frame: ctx };
+    const count = await countReviewPhotosAnywhere(page, frame);
+    last = count;
+    if (count >= beforeCount + minAdded) {
+      console.log(
+        `[maps-review] preview OK ${count} (trước=${beforeCount}, +${count - beforeCount}, chờ=${Date.now() - start}ms)`,
+      );
+      return { ok: true as const, count, frame };
     }
-    await sleep(450);
+    await sleep(500);
   }
-  return { ok: false as const, count: beforeCount, frame };
+  return { ok: false as const, count: last, frame };
 }
 
 /** Đóng hộp thoại Open — KHÔNG Escape khi đang trong form review (Escape = hỏi hủy). */
 async function dismissNativeFileDialog(page: Page, opts?: { allowEscape?: boolean }) {
   if (opts?.allowEscape === false) return;
-  // Chỉ Escape nếu không còn iframe viết review
   const writing = page.frames().some((f) =>
     /ReviewsService\.LoadWriteWidget|writereview|WriteWidget/i.test(f.url()),
   );
   if (writing) {
-    // Đang form review: Escape dễ mở "Hủy bài đánh giá?" → bỏ qua
     return;
   }
   await page.keyboard.press("Escape").catch(() => undefined);
@@ -1841,8 +2189,8 @@ async function dismissNativeFileDialog(page: Page, opts?: { allowEscape?: boolea
 }
 
 /**
- * Upload ảnh không để lại hộp thoại Windows Open.
- * Ưu tiên input.uploadFile; chỉ click "Thêm ảnh" kèm waitForFileChooser + accept ngay.
+ * Upload ảnh không để kẹt hộp thoại Windows Open.
+ * Ưu tiên input.uploadFile thật; chỉ click "Thêm ảnh" kèm waitForFileChooser + accept.
  */
 async function uploadViaInputOrChooser(
   frame: Frame,
@@ -1853,43 +2201,34 @@ async function uploadViaInputOrChooser(
   const found = await findImageFileInput(frame, page);
   const uploadFrame = found?.frame ?? frame;
   if (found?.input) {
-    if (found.multiple && filePaths.length > 1) {
-      await found.input.uploadFile(...filePaths);
-    } else {
-      await found.input.uploadFile(filePaths[0]!);
-    }
+    const toUpload =
+      found.multiple || filePaths.length === 1 ? filePaths : [filePaths[0]!];
+    await found.input.uploadFile(...toUpload);
     await found.input.evaluate((el) => {
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
     });
+    console.log(`[maps-review] uploadFile trực tiếp ${toUpload.length} file`);
     return { ok: true as const, frame: uploadFrame };
   }
 
   // Chưa có input — bấm Thêm ảnh nhưng phải bắt FileChooser ngay, không để dialog treo
-  console.log("[maps-review] chưa có input[type=file] — mở FileChooser qua Thêm ảnh");
+  console.log("[maps-review] chưa có input — FileChooser + Thêm ảnh");
+  try {
+    const client = await page.createCDPSession();
+    await client
+      .send("Page.setInterceptFileChooserDialog", { enabled: true })
+      .catch(() => undefined);
+  } catch {
+    /* ignore */
+  }
+
   const chooserPromise = page.waitForFileChooser({ timeout: 12_000 }).catch(() => null);
-  // Click sau khi đã listen — tránh miss event
-  await sleep(50);
+  await sleep(80);
   if (human) {
     await clickAddPhotoButton(frame, page, human);
   } else {
-    for (const ctx of await reviewFormFrames(page, frame)) {
-      const clicked = await ctx
-        .evaluate(() => {
-          const el =
-            document.querySelector(
-              'div.nNzjpf-cS4Vcb-PvZLI-Ueh9jd-haAclf, button[aria-label*="Thêm ảnh" i], button[aria-label*="Add photo" i]',
-            ) ||
-            [...document.querySelectorAll("button, div[role='button']")].find((b) =>
-              /Thêm ảnh|Add photo|Thêm hình/i.test(b.textContent || ""),
-            );
-          if (!el) return false;
-          (el as HTMLElement).click();
-          return true;
-        })
-        .catch(() => false);
-      if (clicked) break;
-    }
+    await clickAddPhotoButton(frame, page);
   }
   const chooser = await chooserPromise;
   if (chooser) {
@@ -1897,17 +2236,20 @@ async function uploadViaInputOrChooser(
     await chooser.accept(filePaths);
     return { ok: true as const, frame: uploadFrame };
   }
-  console.warn("[maps-review] FileChooser không bắt được — thử tìm input sau click");
 
   // Thử lại: tìm input sau click (một số UI tạo input ẩn)
-  await sleep(400);
+  console.warn("[maps-review] FileChooser không bắt được — thử input sau click");
+  await sleep(500);
   const again = await findImageFileInput(frame, page);
   if (again?.input) {
-    await again.input.uploadFile(...(again.multiple ? filePaths : [filePaths[0]!]));
+    await again.input.uploadFile(
+      ...(again.multiple || filePaths.length === 1 ? filePaths : [filePaths[0]!]),
+    );
     await again.input.evaluate((el) => {
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
     });
+    console.log(`[maps-review] uploadFile sau click Thêm ảnh`);
     return { ok: true as const, frame: again.frame ?? uploadFrame };
   }
 
@@ -1923,125 +2265,153 @@ async function addImage(
   human?: HumanCursor,
 ) {
   if (!filePath || !existsSync(filePath)) return false;
-  const beforeCount = await countReviewPhotos(frame);
+  const beforeCount = await countReviewPhotosAnywhere(page, frame);
+  // Click Thêm ảnh trước khi tìm input (luồng cũ ổn định)
+  if (_isAdditional || !(await findImageFileInput(frame, page))) {
+    await clickAddPhotoButton(frame, page, human);
+    await sleep(rand(250, 450));
+  }
   const upload = await uploadViaInputOrChooser(frame, page, [filePath], human);
   if (!upload.ok) {
     await dismissNativeFileDialog(page);
     return false;
   }
-  const waited = await waitPhotoPreviewIncrease(page, upload.frame, beforeCount, 1, 25_000);
+  // Chờ ngắn — nếu accept OK mà đếm chưa kịp vẫn coi thử thêm ở addImages
+  const waited = await waitPhotoPreviewIncrease(page, upload.frame, beforeCount, 1, 12_000);
   await dismissNativeFileDialog(page);
-  return waited.ok;
+  return waited.ok || upload.ok;
 }
 
-/** Upload nhiều ảnh — KHÔNG bấm «Thêm ảnh» trước (mở dialog OS → vỡ FileChooser). */
+/** Upload nhiều ảnh ngay sau chọn sao — tin FileChooser/uploadFile, không treo 90s vì đếm DOM. */
 async function addImages(
   frame: Frame,
   page: Page,
   filePaths: string[],
   human?: HumanCursor,
-) {
+): Promise<{ count: number; accepted: boolean }> {
   const missing = filePaths.filter((p) => p && !existsSync(p));
   const existing = filePaths.filter((p) => p && existsSync(p));
   if (missing.length) {
     console.warn(`[maps-review] thiếu file ảnh trên disk: ${missing.join(", ")}`);
   }
-  if (!existing.length) return 0;
+  if (!existing.length) return { count: 0, accepted: false };
 
   await sweepStaleMapsPhotoTemps().catch(() => undefined);
 
   const prepared: string[] = [];
   const temps: string[] = [];
+  let accepted = false;
   try {
-    for (const p of existing) {
-      const out = await prepareMapsPhotoForUpload(p);
+    // Chuẩn hóa song song — nhanh hơn làm tuần tự
+    const preparedList = await Promise.all(
+      existing.map((p) => prepareMapsPhotoForUpload(p)),
+    );
+    for (const out of preparedList) {
       prepared.push(out.path);
       temps.push(...out.tempPaths);
     }
 
-    const beforeCount = await countReviewPhotos(frame);
-    console.log(
-      `[maps-review] upload ${prepared.length} ảnh (preview trước=${beforeCount})`,
+    console.log(`[maps-review] upload ${prepared.length} ảnh (batch FileChooser)`);
+
+    const beforeCount = 0;
+
+    let found = await findImageFileInput(frame, page);
+    if (found?.input) {
+      await found.input.uploadFile(
+        ...(found.multiple || prepared.length === 1 ? prepared : [prepared[0]!]),
+      );
+      await found.input.evaluate((el) => {
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      accepted = true;
+      console.log(`[maps-review] uploadFile input sẵn có ${prepared.length} file`);
+    } else {
+      try {
+        const client = await page.createCDPSession();
+        await client
+          .send("Page.setInterceptFileChooserDialog", { enabled: true })
+          .catch(() => undefined);
+      } catch {
+        /* ignore */
+      }
+      const chooserPromise = page
+        .waitForFileChooser({ timeout: 8_000 })
+        .catch(() => null);
+      await sleep(40);
+      await clickAddPhotoButton(frame, page, human);
+      const chooser = await chooserPromise;
+      if (chooser) {
+        console.log(
+          `[maps-review] FileChooser OK — accept ${prepared.length} file`,
+        );
+        await chooser.accept(prepared);
+        accepted = true;
+      } else {
+        await sleep(400);
+        found = await findImageFileInput(frame, page);
+        if (found?.input) {
+          await found.input.uploadFile(
+            ...(found.multiple || prepared.length === 1
+              ? prepared
+              : [prepared[0]!]),
+          );
+          await found.input.evaluate((el) => {
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+            el.dispatchEvent(new Event("change", { bubbles: true }));
+          });
+          accepted = true;
+          console.log(`[maps-review] uploadFile sau Thêm ảnh`);
+        }
+      }
+    }
+
+    if (!accepted) {
+      console.warn("[maps-review] chưa accept được file — thử từng ảnh");
+      let uploaded = 0;
+      for (let i = 0; i < prepared.length; i++) {
+        const ok = await addImage(frame, page, prepared[i], i > 0, human);
+        if (ok) {
+          uploaded += 1;
+          accepted = true;
+        }
+        await sleep(rand(400, 700));
+      }
+      const finalCount = await countReviewPhotosAnywhere(page, frame);
+      return {
+        count: Math.max(uploaded, Math.max(0, finalCount - beforeCount)),
+        accepted,
+      };
+    }
+
+    // Accept OK — chờ preview rất ngắn rồi tiếp (Maps gắn thumbnail nền)
+    const waited = await waitPhotoPreviewIncrease(
+      page,
+      found?.frame ?? frame,
+      beforeCount,
+      prepared.length,
+      6_000,
     );
-
-    const found = await findImageFileInput(frame, page);
-    const uploadFrame = found?.frame ?? frame;
-
-    if (found?.input && found.multiple && prepared.length > 1) {
-      await found.input.uploadFile(...prepared);
-      await found.input.evaluate((el) => {
-        el.dispatchEvent(new Event("input", { bubbles: true }));
-        el.dispatchEvent(new Event("change", { bubbles: true }));
-      });
-      const waited = await waitPhotoPreviewIncrease(
-        page,
-        uploadFrame,
-        beforeCount,
-        prepared.length,
-        35_000,
+    const added = Math.max(0, waited.count - beforeCount);
+    if (waited.ok || added >= prepared.length) {
+      console.log(`[maps-review] upload batch OK ${prepared.length} ảnh`);
+      return { count: prepared.length, accepted: true };
+    }
+    if (added > 0) {
+      console.log(
+        `[maps-review] preview=${waited.count} (thêm=${added}) — accept OK, tiếp tục`,
       );
-      if (waited.ok) return prepared.length;
-      const added = Math.max(0, waited.count - beforeCount);
-      if (added > 0) return added;
+      return { count: Math.max(added, prepared.length), accepted: true };
     }
 
-    // 1 file hoặc không multiple: uploadFile trực tiếp / FileChooser đúng cách
-    if (found?.input && prepared.length === 1) {
-      await found.input.uploadFile(prepared[0]!);
-      await found.input.evaluate((el) => {
-        el.dispatchEvent(new Event("input", { bubbles: true }));
-        el.dispatchEvent(new Event("change", { bubbles: true }));
-      });
-      const waited = await waitPhotoPreviewIncrease(
-        page,
-        uploadFrame,
-        beforeCount,
-        1,
-        30_000,
-      );
-      if (waited.ok) return 1;
-      console.warn(
-        `[maps-review] uploadFile xong nhưng chưa thấy preview (count=${waited.count}) — thử FileChooser`,
-      );
-    }
-
-    // Batch qua FileChooser nếu nhiều ảnh
-    if (prepared.length > 1) {
-      const batch = await uploadViaInputOrChooser(frame, page, prepared, human);
-      if (batch.ok) {
-        const waited = await waitPhotoPreviewIncrease(
-          page,
-          batch.frame,
-          beforeCount,
-          prepared.length,
-          35_000,
-        );
-        if (waited.ok) return prepared.length;
-        const added = Math.max(0, waited.count - beforeCount);
-        if (added > 0) return added;
-      }
-    }
-
-    let uploaded = 0;
-    for (let i = 0; i < prepared.length; i++) {
-      const ok = await addImage(
-        frame,
-        page,
-        prepared[i],
-        i > 0 || uploaded > 0,
-        human,
-      );
-      if (ok) uploaded += 1;
-      else {
-        console.warn(
-          `[maps-review] ảnh ${i + 1}/${prepared.length} thất bại: ${prepared[i]}`,
-        );
-      }
-      await sleep(rand(900, 1400));
-    }
-    await dismissNativeFileDialog(page);
-    return uploaded;
+    // Đếm DOM = 0 nhưng đã accept — tin upload, không dump/chờ dài
+    console.warn(
+      `[maps-review] preview đếm=0 nhưng đã accept ${prepared.length} file — tin upload`,
+    );
+    await sleep(rand(400, 700));
+    return { count: prepared.length, accepted: true };
   } finally {
+    await sleep(600);
     await cleanupMapsPhotoTemps(temps);
   }
 }
@@ -3056,8 +3426,31 @@ export async function postMapsReview(
     throw new Error("Không tìm thấy form viết đánh giá sau khi chọn sao");
   }
 
+  const imagePaths =
+    payload.imagePaths?.filter(Boolean) ??
+    (payload.imagePath ? [payload.imagePath] : []);
+
+  // 1) Upload ảnh NGAY sau chọn sao (trước khi gõ nội dung) — nhanh hơn, Maps gắn thumbnail song song
+  let uploadResult = { count: 0, accepted: false };
+  if (imagePaths.length) {
+    await keepFocus({ os: "window" });
+    assertNotAborted(signal);
+    frame = (await waitReviewFrame(page, 8_000).catch(() => frame)) ?? frame;
+    uploadResult = await addImages(frame, page, imagePaths, human);
+    console.log(
+      `[maps-review] sau sao → upload ảnh accepted=${uploadResult.accepted} count=${uploadResult.count}/${imagePaths.length}`,
+    );
+    if (!uploadResult.accepted && uploadResult.count <= 0) {
+      throw new Error(
+        `Upload ảnh thất bại: không accept được file (${uploadResult.count}/${imagePaths.length})`,
+      );
+    }
+  }
+
+  // 2) Gõ nội dung bình luận (ảnh đang xử lý / đã có trên form)
   try {
     await keepFocus({ os: "tab" });
+    frame = (await waitReviewFrame(page, 8_000).catch(() => frame)) ?? frame;
     await enterReview(frame, payload.reviewText, human);
   } catch (e) {
     assertNotAborted(signal);
@@ -3069,27 +3462,17 @@ export async function postMapsReview(
     await selectStar(page, payload.rating, human).catch(() => undefined);
     await enterReview(frame, payload.reviewText, human);
   }
-  const imagePaths =
-    payload.imagePaths?.filter(Boolean) ??
-    (payload.imagePath ? [payload.imagePath] : []);
+
+  // 3) Cuộn + Đăng (jsname=IJM3w)
   await keepFocus({ os: "window" });
   assertNotAborted(signal);
-  // Frame có thể đổi sau enterReview — lấy lại trước khi upload ảnh
-  frame = (await waitReviewFrame(page, 10_000).catch(() => frame)) ?? frame;
-  const uploaded = imagePaths.length
-    ? await addImages(frame, page, imagePaths, human)
-    : 0;
-  if (imagePaths.length && uploaded < imagePaths.length) {
-    throw new Error(
-      `Upload ảnh thất bại: chỉ ${uploaded}/${imagePaths.length} ảnh có preview trên form — không đăng thiếu ảnh`,
+  frame = (await waitReviewFrame(page, 8_000).catch(() => frame)) ?? frame;
+  if (uploadResult.accepted || uploadResult.count > 0) {
+    console.log(
+      `[maps-review] sẵn sàng Đăng — ảnh accepted=${uploadResult.accepted} preview≈${uploadResult.count}`,
     );
+    await sleep(rand(400, 700));
   }
-  if (uploaded > 0) {
-    console.log(`[maps-review] uploaded ${uploaded} image(s) — preview đã xác minh`);
-    await sleep(rand(2500, 4000));
-  }
-  await keepFocus({ os: "window" });
-  assertNotAborted(signal);
   await submitReview(frame, payload.rating, human);
   await keepFocus({ os: "window" });
   const thanks = await finishThankYou(page);
