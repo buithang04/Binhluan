@@ -4,6 +4,7 @@ import { z } from "zod";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import {
+  isReviewContentGenerated,
   normalizeStarKey,
   parseReviewSpinByStar,
   validateSpinTemplate,
@@ -42,7 +43,9 @@ export async function GET(_req: Request, ctx: Ctx) {
 
   return NextResponse.json({
     spinByStar: parseReviewSpinByStar(project.reviewSpinByStar),
-    generatedAt: project.reviewContentGeneratedAt,
+    generatedAt: isReviewContentGenerated(project.reviewContentGeneratedAt)
+      ? project.reviewContentGeneratedAt
+      : null,
     settings: {
       contentDirection: project.contentDirection,
       contentLanguage: project.contentLanguage,
@@ -68,7 +71,7 @@ export async function PATCH(req: Request, ctx: Ctx) {
   if (!project) {
     return NextResponse.json({ error: "Không tìm thấy dự án" }, { status: 404 });
   }
-  if (!project.reviewContentGeneratedAt) {
+  if (!isReviewContentGenerated(project.reviewContentGeneratedAt)) {
     return NextResponse.json(
       { error: "Cần sinh nội dung trước khi chỉnh sửa template" },
       { status: 400 },

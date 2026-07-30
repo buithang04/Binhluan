@@ -5,7 +5,6 @@ import {
 } from "@/lib/prompt-template";
 import {
   STAR_SPIN_RESPONSE_FORMAT,
-  STAR_SPIN_RESPONSE_FORMAT_JSON_OBJECT,
 } from "@/lib/deepseek-schema";
 import { loadDeepSeekSettings } from "@/lib/deepseek-settings";
 
@@ -43,7 +42,7 @@ export async function callDeepSeekPayload(
     model: payload.model || "deepseek-v4-flash",
     messages: payload.messages,
     temperature: payload.temperature ?? 0.85,
-    max_tokens: payload.max_tokens ?? 800,
+    max_tokens: payload.max_tokens ?? 2500,
     ...(rf != null ? { response_format: rf } : {}),
   });
 
@@ -63,25 +62,11 @@ export async function callDeepSeekPayload(
 
     let { res, errBody } = await attempt(responseFormat);
 
-    // Model không hỗ trợ json_schema → fallback json_object
-    if (
-      !res.ok &&
-      responseFormat &&
-      typeof responseFormat === "object" &&
-      (responseFormat as { type?: string }).type === "json_schema" &&
-      (res.status === 400 ||
-        /response_format|json_schema|schema|invalid/i.test(errBody))
-    ) {
-      console.warn(
-        "[deepseek] json_schema không hỗ trợ — fallback response_format=json_object",
-      );
-      ({ res, errBody } = await attempt(STAR_SPIN_RESPONSE_FORMAT_JSON_OBJECT));
-    }
-
+    // Không tự fallback/retry lần 2 — fail rõ để user bấm Sinh lại (đúng 1 call / lần bấm)
     if (!res.ok) {
       return {
         text: null,
-        error: `DeepSeek HTTP ${res.status}: ${errBody.slice(0, 200)}`,
+        error: `DeepSeek HTTP ${res.status}: ${errBody.slice(0, 200)} — bấm Sinh lại`,
       };
     }
 
@@ -89,11 +74,17 @@ export async function callDeepSeekPayload(
       choices?: { message?: { content?: string } }[];
     };
     const text = data.choices?.[0]?.message?.content?.trim() || null;
+    if (!text) {
+      return {
+        text: null,
+        error: "DeepSeek trả về rỗng — bấm Sinh lại",
+      };
+    }
     return { text };
   } catch (e) {
     return {
       text: null,
-      error: e instanceof Error ? e.message : "DeepSeek request failed",
+      error: `${e instanceof Error ? e.message : "DeepSeek request failed"} — bấm Sinh lại`,
     };
   }
 }

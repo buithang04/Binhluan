@@ -809,7 +809,7 @@ export function ReviewPlanPanel({
           </p>
           <ul className="mt-2 max-h-40 space-y-1 overflow-y-auto text-sm text-[var(--ink-soft)]">
             {failedAssignments.slice(0, 12).map((a) => (
-              <li key={a.id}>
+              <li key={a.id} className="break-all">
                 <strong>#{a.sortOrder + 1}</strong> {a.profileEmail || "—"}:{" "}
                 {formatReviewError(a.error) || assignmentStatusLabel(a.status)}
               </li>
@@ -924,19 +924,24 @@ export function ReviewPlanPanel({
                         onPreview={setLightboxSrc}
                       />
                     </td>
-                    <td className="py-2 pr-2">
+                    <td className="max-w-[220px] py-2 pr-2 align-top">
                       <span className="badge badge-neutral" title={a.status}>
                         {assignmentStatusLabel(a.status)}
                       </span>
                       {a.error && (
-                        <p className="mt-1 max-w-[200px] text-xs text-[var(--danger)]">
+                        <p
+                          className="mt-1 max-h-24 overflow-y-auto break-all text-xs leading-snug text-[var(--danger)]"
+                          title={formatReviewError(a.error) || undefined}
+                        >
                           {formatReviewError(a.error)}
                         </p>
                       )}
                     </td>
-                    <td className="py-2 pr-2 max-w-[220px] text-xs text-[var(--ink-soft)]">
-                      {a.reviewText.slice(0, 120)}
-                      {a.reviewText.length > 120 ? "…" : ""}
+                    <td className="max-w-[220px] overflow-hidden py-2 pr-2 text-xs text-[var(--ink-soft)]">
+                      <span className="line-clamp-4 break-words">
+                        {a.reviewText.slice(0, 120)}
+                        {a.reviewText.length > 120 ? "…" : ""}
+                      </span>
                     </td>
                     <td className="py-2 pr-2">
                       {a.reviewLink ? (

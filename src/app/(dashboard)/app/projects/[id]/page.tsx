@@ -128,7 +128,12 @@ export default async function ProjectDetailPage({ params }: Props) {
           initialStarPlanBlockers={initialBlockers}
           initialPackageLimit={project.package.targetContents}
           initialSpinByStar={parseReviewSpinByStar(project.reviewSpinByStar)}
-          initialGeneratedAt={project.reviewContentGeneratedAt?.toISOString() ?? null}
+          initialGeneratedAt={
+            project.reviewContentGeneratedAt &&
+            project.reviewContentGeneratedAt.getTime() > 0
+              ? project.reviewContentGeneratedAt.toISOString()
+              : null
+          }
         />
       </div>
 
@@ -148,7 +153,12 @@ export default async function ProjectDetailPage({ params }: Props) {
         projectId={project.id}
         packageTargetContents={project.package.targetContents}
         initialMediaCount={project.media.length}
-        initialContentGenerated={!!project.reviewContentGeneratedAt}
+        initialContentGenerated={
+          !!(
+            project.reviewContentGeneratedAt &&
+            project.reviewContentGeneratedAt.getTime() > 0
+          )
+        }
         initialPlan={initialPlan}
         initialStarPreview={initialStarPlan}
         initialBlockers={initialBlockers}

@@ -97,6 +97,15 @@ export function parseReviewSpinByStar(raw: unknown): ReviewSpinByStar {
 }
 
 /** Kiểm tra template spin hợp lệ (có block {a|b|c}). */
+/** true chỉ khi đã sinh thành công (bỏ qua sentinel epoch). */
+export function isReviewContentGenerated(
+  value: Date | string | null | undefined,
+): boolean {
+  if (!value) return false;
+  const t = value instanceof Date ? value.getTime() : new Date(value).getTime();
+  return Number.isFinite(t) && t > 0;
+}
+
 export function validateSpinTemplate(template: string): { ok: true } | { ok: false; error: string } {
   const t = template.trim();
   if (!t) return { ok: false, error: "Template không được rỗng" };
@@ -261,8 +270,8 @@ export function parseBatchStarSpinResponse(
 }
 
 /**
- * Sinh spin cho tất cả mức sao cần dùng — **1 lần call DeepSeek**.
- * Prompt JSON dùng {{ $json.settings.star_levels }} + response_format schema.
+ * Sinh spin cho tất cả mức sao cần dùng — **đúng 1 lần call DeepSeek**.
+ * Fail → không lưu; client bấm lại. Không retry / không gọi từng sao.
  */
 export async function generateAllStarSpins(
   project: ProjectForReviewContent & {
@@ -270,7 +279,7 @@ export async function generateAllStarSpins(
     contentPromptJson?: string | null;
   },
   starLevels: number[],
-): Promise<{ spinByStar: ReviewSpinByStar; errors: string[] }> {
+): Promise<{ spinByStar: ReviewSpinByStar; errors: string[]; apiCalls: number }> {
   const levels = [...new Set(
     starLevels
       .map((s) => Math.min(5, Math.max(1, Math.round(s))))
@@ -278,73 +287,24 @@ export async function generateAllStarSpins(
   )].sort((a, b) => a - b);
 
   if (!levels.length) {
-    return { spinByStar: {}, errors: ["Không có mức sao nào để sinh"] };
+    return {
+      spinByStar: {},
+      errors: ["Không có mức sao nào để sinh"],
+      apiCalls: 0,
+    };
   }
 
   const { generateWithPromptJson } = await import("@/lib/deepseek");
   const { resolveEffectivePromptJson } = await import("@/lib/deepseek-settings");
 
-  const effective = await resolveEffectivePromptJson(
-    project.contentPromptJson,
+  const effective = await resolveEffectivePromptJson(project.contentPromptJson);
+
+  console.log(
+    `[review-content] DeepSeek 1 call — levels=[${levels.join(",")}] model batch`,
   );
-  const promptJson = effective.promptJson;
-
-  // Prompt cũ (1 sao / lần) — vẫn hỗ trợ song song để không gãy dự án đã lưu prompt legacy
-  const isLegacySingle =
-    /\$json\.settings\.stars/.test(promptJson) &&
-    !/\$json\.settings\.star_levels/.test(promptJson) &&
-    !/response_format/.test(promptJson);
-
-  if (isLegacySingle) {
-    console.warn(
-      "[review-content] Prompt legacy 1-sao — gọi song song. Bấm Reset mặc định để dùng 1 call batch.",
-    );
-    const spinByStar: ReviewSpinByStar = {};
-    const errors: string[] = [];
-    const results = await Promise.all(
-      levels.map(async (stars) => {
-        const result = await generateWithPromptJson(
-          promptJson,
-          {
-            brandName: project.brandName,
-            website: project.website,
-            brandDescription: project.brandDescription,
-            targetAudience: project.targetAudience,
-            targetMarket: project.targetMarket,
-            writingNotes: project.writingNotes,
-            googleMapsUrl: project.googleMapsUrl || "",
-            contentDirection: project.contentDirection,
-            contentLanguage: project.contentLanguage,
-            contentExample: project.contentExample,
-            contentWordCount: project.contentWordCount,
-            products: project.products,
-          },
-          { stars },
-        );
-        return { stars, result };
-      }),
-    );
-    for (const { stars, result } of results) {
-      if (!result.text) {
-        errors.push(`${stars}★: ${result.error || "thất bại"}`);
-        continue;
-      }
-      const cleaned = result.text
-        .replace(/^```[\w]*\n?/m, "")
-        .replace(/\n?```$/m, "")
-        .trim();
-      const check = validateSpinTemplate(cleaned);
-      if (!check.ok) {
-        errors.push(`${stars}★: ${check.error}`);
-        continue;
-      }
-      spinByStar[String(stars)] = cleaned;
-    }
-    return { spinByStar, errors };
-  }
 
   const result = await generateWithPromptJson(
-    promptJson,
+    effective.promptJson,
     {
       brandName: project.brandName,
       website: project.website,
@@ -365,9 +325,27 @@ export async function generateAllStarSpins(
   if (!result.text) {
     return {
       spinByStar: {},
-      errors: [result.error || "DeepSeek không trả về nội dung"],
+      errors: [
+        result.error ||
+          "DeepSeek không trả về nội dung — bấm Sinh lại (không gọi thêm lần nào)",
+      ],
+      apiCalls: 1,
     };
   }
 
-  return parseBatchStarSpinResponse(result.text, levels);
+  const parsed = parseBatchStarSpinResponse(result.text, levels);
+  // Thiếu bất kỳ mức sao nào → coi fail cả lô (không lưu nửa vời)
+  const missing = levels.filter((s) => !parsed.spinByStar[String(s)]);
+  if (missing.length) {
+    return {
+      spinByStar: {},
+      errors: [
+        ...parsed.errors,
+        `Thiếu mức sao: ${missing.join(", ")}★ — bấm Sinh lại`,
+      ],
+      apiCalls: 1,
+    };
+  }
+
+  return { spinByStar: parsed.spinByStar, errors: [], apiCalls: 1 };
 }

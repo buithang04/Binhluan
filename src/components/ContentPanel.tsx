@@ -192,15 +192,18 @@ export function ContentPanel({
       });
       const data = await res.json();
       if (!res.ok) {
-        setError(data.error || "Sinh nội dung thất bại");
+        setGeneratedAt(null);
+        setError(
+          data.error ||
+            "Sinh thất bại — bấm lại để thử (không tự lặp, chưa khóa dự án)",
+        );
         return;
       }
       setSpinByStar(data.spinByStar || {});
       setGeneratedAt(data.generatedAt || new Date().toISOString());
       if (data.planned) setStarPlan(data.planned);
       setMessage(
-        `Đã sinh template spin cho ${(data.starLevels || []).join("★, ")}★` +
-          (data.warnings?.length ? ` (cảnh báo: ${data.warnings.join("; ")})` : ""),
+        `Đã sinh xong (${data.apiCalls ?? 1} lần gọi DeepSeek) cho ${(data.starLevels || []).join("★, ")}★ — dự án khóa, không sinh lại`,
       );
     } catch {
       setError("Không kết nối được máy chủ");
