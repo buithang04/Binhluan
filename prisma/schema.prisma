@@ -355,9 +355,9 @@ model Project {
   media            MediaAsset[]
   campaigns        ContentCampaign[]
 
-  @@unique([userId, googleMapsUrl])
   @@index([userId])
   @@index([status])
+  @@index([googleMapsUrl])
 }
 
 model Product {

@@ -12,7 +12,6 @@ const links = [
   { href: "/admin/proxies", label: "Proxy", hint: "Mạng" },
   { href: "/admin/profiles", label: "Hồ sơ", hint: "Trình duyệt" },
   { href: "/admin/jobs", label: "Công việc", hint: "Hàng đợi" },
-  { href: "/admin/templates", label: "Mẫu nội dung", hint: "Nội dung" },
   { href: "/admin/deepseek", label: "DeepSeek", hint: "AI / Prompt" },
   { href: "/admin/packages", label: "Gói dịch vụ", hint: "Gói" },
 ];

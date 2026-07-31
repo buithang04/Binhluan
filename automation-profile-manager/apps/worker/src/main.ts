@@ -3128,34 +3128,61 @@ async function focusLiveBrowser(profileId: string) {
 /** Tìm PID Chrome theo user-data-dir khi puppeteer.connect() không có process().pid */
 async function resolveChromePidByProfileDir(userDataDir?: string): Promise<number | undefined> {
   if (!userDataDir || process.platform !== "win32") return undefined;
+  const map = await listChromePidsByUserDataDir();
+  return map.get(path.resolve(userDataDir).toLowerCase());
+}
+
+/**
+ * Một lần PowerShell: map user-data-dir (lower) → PID Chrome MAIN.
+ * Tránh gọi Get-CimInstance lặp mỗi profile trong heartbeat (làm sync trống → UI “Tắt”).
+ */
+let chromePidMapCache: { at: number; map: Map<string, number> } | null = null;
+async function listChromePidsByUserDataDir(): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  if (process.platform !== "win32") return out;
+  const now = Date.now();
+  if (chromePidMapCache && now - chromePidMapCache.at < 4_000) {
+    return chromePidMapCache.map;
+  }
   const { execFile } = await import("child_process");
   const { promisify } = await import("util");
   const execFileAsync = promisify(execFile);
-  const needle = userDataDir.replace(/'/g, "''");
-  // Ưu tiên process MAIN (không --type=) — renderer/utility không có cửa sổ → focus fail "no-window"
   const ps = `
-$needle = '${needle}'
-$procs = Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction SilentlyContinue |
-  Where-Object { $_.CommandLine -and $_.CommandLine.IndexOf($needle, [StringComparison]::OrdinalIgnoreCase) -ge 0 }
-$main = $procs | Where-Object { $_.CommandLine -notmatch '--type=' } |
-  Sort-Object WorkingSetSize -Descending |
-  Select-Object -First 1 -ExpandProperty ProcessId
-if ($main) { Write-Output $main; return }
-$procs |
-  Sort-Object WorkingSetSize -Descending |
-  Select-Object -First 1 -ExpandProperty ProcessId
+Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction SilentlyContinue |
+  Where-Object { $_.CommandLine -and $_.CommandLine -notmatch '--type=' -and $_.CommandLine -match '--user-data-dir' } |
+  ForEach-Object {
+    $cl = $_.CommandLine
+    $dir = $null
+    if ($cl -match '--user-data-dir=(?:"([^"]+)"|(\\S+))') {
+      $dir = if ($Matches[1]) { $Matches[1] } else { $Matches[2] }
+    } elseif ($cl -match '--user-data-dir\\s+(?:"([^"]+)"|(\\S+))') {
+      $dir = if ($Matches[1]) { $Matches[1] } else { $Matches[2] }
+    }
+    if ($dir) {
+      try { $dir = [System.IO.Path]::GetFullPath($dir) } catch {}
+      Write-Output (($dir.ToLowerInvariant()) + '|' + $_.ProcessId)
+    }
+  }
 `;
   try {
     const { stdout } = await execFileAsync(
       "powershell.exe",
       ["-NoProfile", "-NonInteractive", "-Command", ps],
-      { timeout: 8_000, windowsHide: true, encoding: "utf8" },
+      { timeout: 20_000, windowsHide: true, encoding: "utf8" },
     );
-    const pid = Number(String(stdout || "").trim().split(/\r?\n/).filter(Boolean).pop());
-    return Number.isFinite(pid) && pid > 0 ? pid : undefined;
+    for (const line of String(stdout || "").split(/\r?\n/)) {
+      const t = line.trim();
+      if (!t || !t.includes("|")) continue;
+      const i = t.lastIndexOf("|");
+      const dir = t.slice(0, i);
+      const pid = Number(t.slice(i + 1));
+      if (dir && Number.isFinite(pid) && pid > 0 && !out.has(dir)) out.set(dir, pid);
+    }
   } catch {
-    return undefined;
+    /* ignore */
   }
+  chromePidMapCache = { at: now, map: out };
+  return out;
 }
 
 /** Đưa cửa sổ Chrome đúng PID lên foreground (Windows) — script .ps1 riêng, ổn định hơn inline. */
@@ -3261,8 +3288,9 @@ async function clearStaleProfileLocks(userDataDir: string) {
  * QUAN TRỌNG:
  * - Không clear lock khi process Chrome còn sống.
  * - Không puppeteer.connect trong heartbeat nếu Chrome đã chạy (cướp CDP → LOGIN disconnect → cửa sổ tắt).
+ * - Trả null khi đang quét (tránh heartbeat chồng → sync list rỗng → UI “Tắt” giả).
  */
-async function collectAliveProfileIds(): Promise<string[]> {
+async function collectAliveProfileIds(): Promise<string[] | null> {
   // Gỡ session pool đã disconnect — nhưng giữ báo cáo alive nếu Chrome process còn / đang LOGIN
   for (const row of browserPool.list()) {
     const live = browserPool.get(row.profileId);
@@ -3295,9 +3323,10 @@ async function collectAliveProfileIds(): Promise<string[]> {
   // Đang LOGIN/MAPS → luôn coi là alive (tránh UI off giữa chừng)
   for (const id of busyProfileIds) ids.add(id);
 
-  if (softReclaimBusy) return [...ids];
+  if (softReclaimBusy) return null;
   softReclaimBusy = true;
   try {
+    const chromeByDir = await listChromePidsByUserDataDir();
     const { profiles } = await api<{ profiles: ReclaimProfile[] }>(
       "/internal/browsers/list-for-reclaim",
       {},
@@ -3320,11 +3349,18 @@ async function collectAliveProfileIds(): Promise<string[]> {
       const userDataDir = path.resolve(STORAGE_DIR, row.browserProfilePath);
       if (!existsSync(userDataDir)) continue;
 
+      const dirKey = userDataDir.toLowerCase();
+      const pid = chromeByDir.get(dirKey);
       const port = await readDevToolsPort(userDataDir);
-      const pid = await resolveChromePidByProfileDir(userDataDir);
 
       // Chrome process còn sống → báo alive, KHÔNG soft-connect (tránh cướp session LOGIN)
       if (pid) {
+        ids.add(row.id);
+        continue;
+      }
+
+      // SingletonLock còn = Chrome đang giữ profile (kể cả khi map PID miss)
+      if (existsSync(path.join(userDataDir, "SingletonLock"))) {
         ids.add(row.id);
         continue;
       }
@@ -3361,6 +3397,7 @@ async function collectAliveProfileIds(): Promise<string[]> {
         await enforceMaxTabs(browser, page0);
         const connectPid =
           browser.process()?.pid ||
+          chromeByDir.get(dirKey) ||
           (await resolveChromePidByProfileDir(userDataDir));
         await browserPool.register({
           profileId: row.id,
@@ -3401,7 +3438,7 @@ async function collectAliveProfileIds(): Promise<string[]> {
 async function heartbeat(runningJobs: number, queueLength = 0) {
   const mem = process.memoryUsage();
   const aliveProfileIds = await collectAliveProfileIds();
-  await api("/internal/workers/heartbeat", {
+  const payload: Record<string, unknown> = {
     id: WORKER_ID,
     hostname: hostname(),
     concurrency: CONCURRENCY,
@@ -3409,8 +3446,10 @@ async function heartbeat(runningJobs: number, queueLength = 0) {
     memPercent: Math.round((mem.heapUsed / mem.heapTotal) * 100),
     queueLength,
     status: "ONLINE",
-    aliveProfileIds,
-  }).catch(() => undefined);
+  };
+  // null = đang quét dở — KHÔNG gửi mảng rỗng (tránh API clear hết browserAlive)
+  if (aliveProfileIds) payload.aliveProfileIds = aliveProfileIds;
+  await api("/internal/workers/heartbeat", payload).catch(() => undefined);
 }
 
 /** Đọc port CDP Chrome đã ghi vào user-data-dir (fallback: cmdline process). */

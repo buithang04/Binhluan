@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/admin";
 import { prisma } from "@/lib/prisma";
 import { getProjectProgressMap } from "@/lib/project-progress";
+import { isReviewContentGenerated } from "@/lib/review-content";
 
 export async function GET() {
   const auth = await requireAdmin();
@@ -14,6 +15,7 @@ export async function GET() {
       status: true,
       startAt: true,
       endAt: true,
+      reviewContentGeneratedAt: true,
       package: { select: { code: true, targetContents: true } },
       user: { select: { email: true, name: true } },
     },
@@ -37,6 +39,7 @@ export async function GET() {
       percent,
       startAt: p.startAt,
       endAt: p.endAt,
+      contentGenerated: isReviewContentGenerated(p.reviewContentGeneratedAt),
     };
   });
 

@@ -410,9 +410,9 @@ model Project {
   campaigns        ContentCampaign[]
   reviewPlans      ReviewPlan[]
 
-  @@unique([userId, googleMapsUrl])
   @@index([userId])
   @@index([status])
+  @@index([googleMapsUrl])
 }
 
 model ReviewPlan {

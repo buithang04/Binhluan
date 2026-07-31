@@ -110,12 +110,7 @@ export async function PUT(req: Request, ctx: Ctx) {
 
     return NextResponse.json({ project });
   } catch (e) {
-    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
-      return NextResponse.json(
-        { error: "Bạn đã có dự án với link Google Maps này" },
-        { status: 409 },
-      );
-    }
+    console.error("[projects] update failed", e);
     return NextResponse.json({ error: "Không thể cập nhật dự án" }, { status: 500 });
   }
 }
@@ -127,13 +122,22 @@ export async function DELETE(_req: Request, ctx: Ctx) {
   }
 
   const { id } = await ctx.params;
-  const existing = await getOwnedProject(
-    id,
-    session.user.id,
-    session.user.role === "ADMIN",
-  );
+  const isAdmin = session.user.role === "ADMIN";
+  const existing = await getOwnedProject(id, session.user.id, isAdmin);
   if (!existing) {
     return NextResponse.json({ error: "Không tìm thấy dự án" }, { status: 404 });
+  }
+
+  // User thường: đã sinh nội dung thì không xóa (kể cả còn DRAFT).
+  if (
+    !isAdmin &&
+    existing.reviewContentGeneratedAt &&
+    existing.reviewContentGeneratedAt.getTime() > 0
+  ) {
+    return NextResponse.json(
+      { error: "Dự án đã sinh nội dung — không thể xóa" },
+      { status: 403 },
+    );
   }
 
   await prisma.project.delete({ where: { id } });

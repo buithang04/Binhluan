@@ -326,8 +326,7 @@ export async function generateAllStarSpins(
     return {
       spinByStar: {},
       errors: [
-        result.error ||
-          "DeepSeek không trả về nội dung — bấm Sinh lại (không gọi thêm lần nào)",
+        result.error || "DeepSeek không trả về nội dung",
       ],
       apiCalls: 1,
     };
@@ -341,7 +340,7 @@ export async function generateAllStarSpins(
       spinByStar: {},
       errors: [
         ...parsed.errors,
-        `Thiếu mức sao: ${missing.join(", ")}★ — bấm Sinh lại`,
+        `Thiếu mức sao: ${missing.join(", ")}★`,
       ],
       apiCalls: 1,
     };

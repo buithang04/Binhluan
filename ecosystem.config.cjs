@@ -15,8 +15,8 @@ module.exports = {
       cwd: root,
       interpreter: nodeBin,
       env: {
-        NODE_ENV: "development",
-        WEB_MODE: "dev",
+        NODE_ENV: "production",
+        WEB_MODE: "prod",
         CHROME_DEBUG: "1",
       },
       min_uptime: 30_000,

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { resolveSpinTemplate } from "@/lib/spin";
 import { formatDateTimeVi } from "@/lib/format-datetime";
 import { useHydrated } from "@/lib/use-hydrated";
@@ -83,6 +83,7 @@ export function ContentPanel({
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const hydrated = useHydrated();
+  const skipAutosaveRef = useRef(true);
 
   const loadAll = useCallback(async () => {
     try {
@@ -141,37 +142,67 @@ export function ContentPanel({
     void loadAll();
   }, [hydratedFromServer, loadAll]);
 
-  async function saveContentSettings(): Promise<boolean> {
-    setError("");
-    setMessage("");
-    setSavingSettings(true);
-    try {
-      const res = await fetch(`/api/projects/${projectId}/content-settings`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contentDirection: contentDirection || null,
-          contentLanguage,
-          contentExample: contentExample || null,
-          contentWordCount:
-            contentWordCount.trim() === "" ? null : Number(contentWordCount),
-          contentPromptJson: null,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setError(data.error || "Lưu cấu hình thất bại");
-        return false;
+  const saveContentSettings = useCallback(
+    async (opts?: { silent?: boolean }): Promise<boolean> => {
+      if (!opts?.silent) {
+        setError("");
+        setMessage("");
       }
-      setMessage("Đã lưu cấu hình (prompt DeepSeek lấy từ Admin → DeepSeek)");
-      return true;
-    } catch {
-      setError("Không kết nối được máy chủ");
-      return false;
-    } finally {
-      setSavingSettings(false);
+      setSavingSettings(true);
+      try {
+        const res = await fetch(`/api/projects/${projectId}/content-settings`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contentDirection: contentDirection || null,
+            contentLanguage,
+            contentExample: contentExample || null,
+            contentWordCount:
+              contentWordCount.trim() === "" ? null : Number(contentWordCount),
+            contentPromptJson: null,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setError(data.error || "Lưu thất bại");
+          return false;
+        }
+        return true;
+      } catch {
+        setError("Không kết nối được máy chủ");
+        return false;
+      } finally {
+        setSavingSettings(false);
+      }
+    },
+    [
+      projectId,
+      contentDirection,
+      contentLanguage,
+      contentExample,
+      contentWordCount,
+    ],
+  );
+
+  // Tự lưu form khi sửa (không cần nút) — trước khi sinh nội dung
+  useEffect(() => {
+    if (generatedAt) return;
+    if (skipAutosaveRef.current) {
+      skipAutosaveRef.current = false;
+      return;
     }
-  }
+    const t = window.setTimeout(() => {
+      void saveContentSettings({ silent: true });
+    }, 700);
+    return () => window.clearTimeout(t);
+  }, [
+    contentDirection,
+    contentLanguage,
+    contentExample,
+    contentWordCount,
+    generatedAt,
+    saveContentSettings,
+  ]);
 
   async function generateReviewContent() {
     if (generatedAt) {
@@ -181,7 +212,7 @@ export function ContentPanel({
     setError("");
     setMessage("");
     setLoading(true);
-    const saved = await saveContentSettings();
+    const saved = await saveContentSettings({ silent: true });
     if (!saved) {
       setLoading(false);
       return;
@@ -193,17 +224,14 @@ export function ContentPanel({
       const data = await res.json();
       if (!res.ok) {
         setGeneratedAt(null);
-        setError(
-          data.error ||
-            "Sinh thất bại — bấm lại để thử (không tự lặp, chưa khóa dự án)",
-        );
+        setError(data.error || "Sinh thất bại — bấm lại để thử");
         return;
       }
       setSpinByStar(data.spinByStar || {});
       setGeneratedAt(data.generatedAt || new Date().toISOString());
       if (data.planned) setStarPlan(data.planned);
       setMessage(
-        `Đã sinh xong (${data.apiCalls ?? 1} lần gọi DeepSeek) cho ${(data.starLevels || []).join("★, ")}★ — dự án khóa, không sinh lại`,
+        `Đã sinh xong cho ${(data.starLevels || []).join("★, ")}★`,
       );
     } catch {
       setError("Không kết nối được máy chủ");
@@ -376,15 +404,7 @@ export function ContentPanel({
         </p>
       </div>
 
-      <div className="flex flex-wrap gap-2">
-        <button
-          type="button"
-          className="btn btn-secondary"
-          disabled={savingSettings || !!generatedAt}
-          onClick={() => void saveContentSettings()}
-        >
-          Lưu cấu hình
-        </button>
+      <div className="flex flex-wrap items-center gap-3">
         <button
           type="button"
           className="btn btn-primary"
@@ -397,6 +417,9 @@ export function ContentPanel({
               ? "Đã sinh nội dung"
               : `Sinh nội dung (${neededStars.length} mức · 1 call)`}
         </button>
+        {!generatedAt && savingSettings && (
+          <span className="text-xs text-[var(--muted)]">Đang lưu…</span>
+        )}
       </div>
 
       {generatedAt && hydrated && (

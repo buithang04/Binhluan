@@ -74,76 +74,105 @@ function buildSearchUrl(placeName: string): string {
 }
 
 const SCRAPE_IN_BROWSER = `(() => {
-  const parseRating = (text) => {
-    const m = String(text).replace(",", ".").match(/(\\d+(?:\\.\\d+)?)/);
-    if (!m) return null;
-    const n = Number(m[1]);
-    return n >= 1 && n <= 5 ? n : null;
+  const toNum = (s) => {
+    const n = Number(String(s).replace(",", ".").replace(/\\s/g, ""));
+    return Number.isFinite(n) ? n : null;
   };
 
-  const parseReviews = (text) => {
-    const n = String(text).replace(/\\u00a0/g, " ");
-    if (/chưa có (?:bài )?đánh giá|no reviews?|be the first|chưa có ai đánh giá|chưa có xếp hạng/i.test(n)) {
-      return 0;
+  /** Cộng histogram aria "N sao, M bài đánh giá" → { total, avg } */
+  const readHistogram = () => {
+    let total = 0;
+    let weighted = 0;
+    let hit = false;
+    for (const el of Array.from(document.querySelectorAll("[aria-label]"))) {
+      const label = (el.getAttribute("aria-label") || "").trim();
+      const m =
+        label.match(/^([1-5])\\s*sao\\s*,\\s*(\\d[\\d.,\\s]*)\\s*bài đánh giá/i) ||
+        label.match(/^([1-5])\\s*stars?\\s*,\\s*(\\d[\\d.,\\s]*)\\s*reviews?/i);
+      if (!m) continue;
+      hit = true;
+      const stars = Number(m[1]);
+      const count = toNum(m[2]) ?? 0;
+      total += count;
+      weighted += stars * count;
     }
-    const compact = n.match(/(\\d+(?:,\\d+)?)\\s*\\((\\d[\\d.,\\s]*)\\)/);
-    if (compact) {
-      const v = Number(compact[2].replace(/[.,\\s]/g, ""));
-      if (Number.isFinite(v) && v >= 0) return v;
-    }
-    const patterns = [
-      /(\\d[\\d.,\\s]*)\\s*(?:bài\\s*)?(?:viết|đánh giá|reviews?)/i,
-      /(\\d[\\d.,\\s]*)\\s*(?:lượt\\s*)?(?:đánh giá|reviews?)/i,
-      /\\((\\d[\\d.,\\s]*)\\)/,
-    ];
-    for (const p of patterns) {
-      const m = n.match(p);
-      if (m && m[1]) {
-        const v = Number(m[1].replace(/[.,\\s]/g, ""));
-        if (Number.isFinite(v) && v >= 0) return v;
-      }
-    }
-    return null;
+    if (!hit) return null;
+    return {
+      total,
+      avg: total > 0 ? Math.round((weighted / total) * 10) / 10 : null,
+    };
   };
 
   const placeName = document.querySelector("h1")?.textContent?.trim() || null;
   let currentRating = null;
   let reviewCount = null;
 
+  // 1) Histogram (ổn định) — ưu tiên khi đã có số liệu
+  const hist = readHistogram();
+  if (hist && hist.total > 0) {
+    reviewCount = hist.total;
+    if (hist.avg != null) currentRating = hist.avg;
+  } else if (hist && hist.total === 0) {
+    reviewCount = 0;
+  }
+
+  // 2) Khối sao tổng quan F7nice (trang Overview) — chỉ khi histogram chưa có
   const nice = document.querySelector("div.F7nice");
-  if (nice) {
-    const spans = Array.from(nice.querySelectorAll("span[aria-hidden='true'], span"));
-    for (const s of spans) {
-      const t = s.textContent || "";
-      if (currentRating == null) currentRating = parseRating(t);
-      if (reviewCount == null) reviewCount = parseReviews(t);
+  if (nice && (currentRating == null || reviewCount == null)) {
+    const niceText = (nice.innerText || "").replace(/\\u00a0/g, " ");
+    if (currentRating == null) {
+      const ratingM = niceText.match(/(\\d+(?:[.,]\\d+)?)/);
+      if (ratingM) {
+        const n = toNum(ratingM[1]);
+        if (n != null && n >= 1 && n <= 5) currentRating = n;
+      }
+    }
+    if (reviewCount == null) {
+      const reviewM = niceText.match(/\\((\\d[\\d.,\\s]*)\\)/) ||
+        niceText.match(/(\\d[\\d.,\\s]*)\\s*(?:bài\\s*)?(?:đánh giá|reviews?)/i);
+      if (reviewM) {
+        const n = toNum(reviewM[1]);
+        if (n != null && n >= 0) reviewCount = n;
+      }
     }
   }
 
-  const ratingEl = document.querySelector("div.fontDisplayLarge, span.ceNzKf");
-  if (currentRating == null && ratingEl) currentRating = parseRating(ratingEl.textContent || "");
+  // 3) Aria điểm TB đúng dạng "3,0 sao" / "3.0 stars"
+  if (currentRating == null) {
+    for (const el of Array.from(document.querySelectorAll("[aria-label]"))) {
+      const label = (el.getAttribute("aria-label") || "").trim();
+      const m =
+        label.match(/^(\\d+(?:[.,]\\d+)?)\\s*sao$/i) ||
+        label.match(/^(\\d+(?:[.,]\\d+)?)\\s*stars?$/i);
+      if (!m) continue;
+      const n = toNum(m[1]);
+      if (n != null && n >= 1 && n <= 5) {
+        currentRating = n;
+        break;
+      }
+    }
+  }
 
+  // 4) Text trang (fallback)
   const body = document.body?.innerText?.slice(0, 8000) || "";
-  if (currentRating == null) currentRating = parseRating(body);
-  if (reviewCount == null) reviewCount = parseReviews(body);
-
-  // Place hợp lệ nhưng chưa có khối sao (F7nice) → thường là 0 lượt đánh giá
-  if (placeName && currentRating == null && reviewCount == null) {
-    const nodes = Array.from(document.querySelectorAll("button, [role='button'], a, [role='tab']"));
-    const hasWriteReview = nodes.some((n) =>
-      /Viết bài đánh giá|Write a review/i.test(
-        (n.getAttribute("aria-label") || "") + " " + (n.textContent || ""),
-      ),
-    );
-    const hasReviewsTab = nodes.some((n) => {
-      const t = ((n.getAttribute("aria-label") || "") + " " + (n.textContent || "")).trim();
-      return /^(Bài đánh giá|Reviews)\\b/i.test(t) || t === "Bài đánh giá" || t === "Reviews";
-    });
-    const hasRatingWidget = !!document.querySelector("div.F7nice, span.ceNzKf[aria-label*='sao'], span.ceNzKf[aria-label*='star']");
-    if (hasWriteReview && !hasRatingWidget) {
+  if (reviewCount == null) {
+    if (/chưa có (?:bài )?đánh giá|no reviews?|be the first|chưa có ai đánh giá|chưa có xếp hạng/i.test(body)) {
       reviewCount = 0;
-    } else if (hasWriteReview && !hasReviewsTab && !hasRatingWidget) {
-      reviewCount = 0;
+    } else {
+      const m = body.match(/(\\d[\\d.,\\s]*)\\s*bài đánh giá/i)
+        || body.match(/(\\d[\\d.,\\s]*)\\s*reviews?\\b/i);
+      if (m) {
+        const n = toNum(m[1]);
+        if (n != null && n >= 0) reviewCount = n;
+      }
+    }
+  }
+  if (currentRating == null) {
+    const m = body.match(/(\\d+(?:[.,]\\d+)?)\\s*sao\\b/i)
+      || body.match(/(\\d+(?:[.,]\\d+)?)\\s*stars?\\b/i);
+    if (m) {
+      const n = toNum(m[1]);
+      if (n != null && n >= 1 && n <= 5) currentRating = n;
     }
   }
 
@@ -268,11 +297,12 @@ async function openReviewsTab(page: import("puppeteer").Page) {
 export async function scrapeGoogleMapsDom(url: string): Promise<MapsPlaceInfo | null> {
   const key = cacheKey(url);
   const hit = scrapeCache.get(key);
-  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.info;
+  // Chỉ dùng cache khi đã quét được dữ liệu — không cache lần fail (tránh "lúc được lúc không")
+  if (hit && hit.info && Date.now() - hit.at < CACHE_TTL_MS) return hit.info;
 
   return withScrapeLock(async () => {
     const again = scrapeCache.get(key);
-    if (again && Date.now() - again.at < CACHE_TTL_MS) return again.info;
+    if (again && again.info && Date.now() - again.at < CACHE_TTL_MS) return again.info;
 
     const browser = await getSharedBrowser();
     const page = await browser.newPage();
@@ -292,25 +322,27 @@ export async function scrapeGoogleMapsDom(url: string): Promise<MapsPlaceInfo | 
             { timeout: 10000 },
           )
           .catch(() => null);
-        await new Promise((r) => setTimeout(r, 600));
+        await new Promise((r) => setTimeout(r, 800));
         scraped = (await page.evaluate(SCRAPE_IN_BROWSER)) as Scraped;
 
-        // Chưa có sao nhưng đã có tên place → thử nhận diện 0 lượt trước khi mở tab Reviews
-        if (
-          scraped.placeName &&
-          scraped.reviewCount == null &&
-          scraped.currentRating == null
-        ) {
-          await new Promise((r) => setTimeout(r, 400));
-          scraped = (await page.evaluate(SCRAPE_IN_BROWSER)) as Scraped;
-        }
-
-        // Place 0 lượt: không cần (và thường không có) tab Reviews
-        if (
-          scraped.reviewCount !== 0 &&
-          (scraped.reviewCount == null || scraped.currentRating == null)
-        ) {
+        // Chưa chắc (thiếu sao/lượt, hoặc 0 lượt nghi ngờ) → mở tab Reviews xác nhận
+        const unsure =
+          scraped.currentRating == null ||
+          scraped.reviewCount == null ||
+          scraped.reviewCount === 0;
+        if (unsure) {
           await openReviewsTab(page);
+          await page
+            .waitForFunction(
+              () =>
+                Array.from(document.querySelectorAll("[aria-label]")).some((el) =>
+                  /^[1-5]\s*sao\s*,/i.test((el.getAttribute("aria-label") || "").trim()),
+                ) ||
+                /bài đánh giá|reviews?/i.test(document.body?.innerText || ""),
+              { timeout: 5000 },
+            )
+            .catch(() => null);
+          await new Promise((r) => setTimeout(r, 400));
           scraped = (await page.evaluate(SCRAPE_IN_BROWSER)) as Scraped;
         }
       } catch {
@@ -318,7 +350,9 @@ export async function scrapeGoogleMapsDom(url: string): Promise<MapsPlaceInfo | 
       }
 
       if (
-        (scraped.currentRating == null || scraped.reviewCount == null) &&
+        (scraped.currentRating == null ||
+          scraped.reviewCount == null ||
+          scraped.reviewCount === 0) &&
         placeNameFromUrl
       ) {
         const href = await resolveSearchHref(page, placeNameFromUrl, placeKey);
@@ -326,17 +360,12 @@ export async function scrapeGoogleMapsDom(url: string): Promise<MapsPlaceInfo | 
           const target = href.includes("?") ? `${href}&hl=vi` : `${href}?hl=vi`;
           await page.goto(target, { waitUntil: "domcontentloaded", timeout: 25000 });
           await page.waitForSelector("h1, div.F7nice", { timeout: 6000 }).catch(() => null);
-          await new Promise((r) => setTimeout(r, 300));
+          await new Promise((r) => setTimeout(r, 500));
 
           scraped = (await page.evaluate(SCRAPE_IN_BROWSER)) as Scraped;
-
-          if (
-            scraped.reviewCount !== 0 &&
-            (scraped.reviewCount == null || scraped.currentRating == null)
-          ) {
-            await openReviewsTab(page);
-            scraped = (await page.evaluate(SCRAPE_IN_BROWSER)) as Scraped;
-          }
+          await openReviewsTab(page);
+          await new Promise((r) => setTimeout(r, 400));
+          scraped = (await page.evaluate(SCRAPE_IN_BROWSER)) as Scraped;
         }
       }
 
@@ -345,7 +374,7 @@ export async function scrapeGoogleMapsDom(url: string): Promise<MapsPlaceInfo | 
         scraped.currentRating == null &&
         scraped.reviewCount == null
       ) {
-        scrapeCache.set(key, { at: Date.now(), info: null });
+        // Không cache null — lần sau thử lại
         return null;
       }
 

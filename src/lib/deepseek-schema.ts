@@ -1,6 +1,6 @@
 /**
- * Schema JSON ép kiểu đầu ra khi sinh spin theo sao (1 call → nhiều mức).
- * Dùng trong response_format của DeepSeek API + Prompt mặc định.
+ * Schema JSON kỳ vọng đầu ra khi sinh spin theo sao (1 call → nhiều mức).
+ * Hiển thị trên Admin → DeepSeek. API dùng json_object (DeepSeek không hỗ trợ json_schema).
  */
 export const STAR_SPIN_OUTPUT_SCHEMA = {
   type: "object",
@@ -32,17 +32,10 @@ export const STAR_SPIN_OUTPUT_SCHEMA = {
   additionalProperties: false,
 } as const;
 
-/** response_format gửi lên DeepSeek — ép JSON đúng schema. */
+/** response_format gửi lên DeepSeek — json_object (hỗ trợ ổn định). */
 export const STAR_SPIN_RESPONSE_FORMAT = {
-  type: "json_schema",
-  json_schema: {
-    name: "maps_star_spin_batch",
-    strict: true,
-    schema: STAR_SPIN_OUTPUT_SCHEMA,
-  },
-} as const;
-
-/** Fallback nếu model không hỗ trợ json_schema. */
-export const STAR_SPIN_RESPONSE_FORMAT_JSON_OBJECT = {
   type: "json_object",
 } as const;
+
+/** Alias — cùng json_object. */
+export const STAR_SPIN_RESPONSE_FORMAT_JSON_OBJECT = STAR_SPIN_RESPONSE_FORMAT;

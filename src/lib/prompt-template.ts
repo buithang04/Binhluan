@@ -174,42 +174,17 @@ export const DEFAULT_DEEPSEEK_PROMPT_JSON = `{
 /**
  * Prompt mặc định — 1 lần call DeepSeek sinh TẤT CẢ mức sao cần dùng.
  * Biến: star_levels / star_guide / star_levels_count (inject theo phân bổ dự án).
- * response_format dùng json_schema (STAR_SPIN_RESPONSE_FORMAT) — ép cấu trúc đầu ra.
+ * response_format: json_object (DeepSeek). Cấu trúc kỳ vọng mô tả trong system prompt.
  */
 export const DEFAULT_STAR_SPIN_PROMPT_JSON = `{
   "model": "deepseek-v4-flash",
   "temperature": 0.9,
-  "max_tokens": 2500,
-  "response_format": {
-    "type": "json_schema",
-    "json_schema": {
-      "name": "maps_star_spin_batch",
-      "strict": true,
-      "schema": {
-        "type": "object",
-        "properties": {
-          "templates": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "stars": { "type": "integer", "minimum": 1, "maximum": 5 },
-                "template": { "type": "string", "minLength": 1 }
-              },
-              "required": ["stars", "template"],
-              "additionalProperties": false
-            }
-          }
-        },
-        "required": ["templates"],
-        "additionalProperties": false
-      }
-    }
-  },
+  "max_tokens": 4000,
+  "response_format": { "type": "json_object" },
   "messages": [
     {
       "role": "system",
-      "content": "Bạn viết template spin bình luận Google Maps bằng {{ $json.settings.content_language }}. Trả về đúng JSON schema maps_star_spin_batch: {\\"templates\\":[{\\"stars\\":<1-5>,\\"template\\":\\"<spin {a|b|c}>\\"}]}. Không markdown, không giải thích. Chỉ gồm các mức sao: {{ $json.settings.star_levels }}. Mỗi block spin 3-5 phương án. Giọng theo:\\n{{ $json.settings.star_guide }}"
+      "content": "Bạn viết template spin bình luận Google Maps bằng {{ $json.settings.content_language }}. Chỉ trả JSON thuần: {\\"templates\\":[{\\"stars\\":<1-5>,\\"template\\":\\"<spin {a|b|c}>\\"}]}. Không markdown, không giải thích. Chỉ gồm các mức sao: {{ $json.settings.star_levels }}. Mỗi block spin 3-5 phương án. Giọng theo:\\n{{ $json.settings.star_guide }}"
     },
     {
       "role": "user",

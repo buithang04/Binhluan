@@ -1,35 +1,37 @@
 /** Nhãn lỗi review / automation — dùng được cả client lẫn server. */
 
 const LOGIN_ISSUE_VI: Record<string, string> = {
-  EMAIL_NOT_FOUND: "Email Google không tồn tại — kiểm tra account trong Admin > Accounts",
-  WRONG_PASSWORD: "Sai mật khẩu Google — cập nhật mật khẩu trong Admin > Accounts",
-  RECAPTCHA: "Cần giải reCAPTCHA thủ công trên Chrome — mở browser và xử lý",
-  CHALLENGE: "Cần xác minh Google thủ công trên Chrome — mở browser và làm theo hướng dẫn",
-  BROWSER_BLOCKED: "Chrome bị Google chặn — reset browser và đăng nhập lại",
+  EMAIL_NOT_FOUND: "Email Google không tồn tại",
+  WRONG_PASSWORD: "Sai mật khẩu Google",
+  RECAPTCHA: "Cần giải reCAPTCHA trên Chrome",
+  CHALLENGE: "Cần xác minh Google trên Chrome",
+  BROWSER_BLOCKED: "Chrome bị Google chặn",
 };
 
 const ERROR_RULES: { test: RegExp; message: string }[] = [
   {
-    // Dữ liệu test cũ bị PowerShell ghi lỗi encoding → "Test d?ng ? ch? ch?y 1 b?i"
     test: /Test d\?ng|Test dừng/i,
-    message: "Đã tạm dừng test (chỉ chạy 1 bài) — bấm Đăng để chạy lại",
+    message: "Đã tạm dừng test — bấm Đăng lại",
+  },
+  {
+    test: /Google chưa đăng nhập|accounts\.google\.com|signin\/identifier/i,
+    message: "Google chưa đăng nhập — mở Chrome đăng nhập rồi Đăng lại",
   },
   {
     test: /không còn proxy|proxy trống|proxy.*cooldown|đang lock hoặc cooldown/i,
-    message:
-      "Không còn proxy khả dụng (đang lock hoặc cooldown) — thêm proxy hoặc chờ hết cooldown",
+    message: "Hết proxy khả dụng — thêm proxy hoặc chờ cooldown",
   },
   {
     test: /không chiếm được proxy|proxy \(race\)/i,
-    message: "Không gán được proxy (đang tranh chấp) — thử lại sau vài giây",
+    message: "Không gán được proxy — thử lại sau",
   },
   {
     test: /MAPS_REVIEW requires a locked proxy/i,
-    message: "Job không có proxy — hệ thống chưa lock được proxy cho bài đăng này",
+    message: "Job thiếu proxy",
   },
   {
     test: /profile already queued|already queued\/running/i,
-    message: "Account đang chạy job khác — đợi job hiện tại hoàn thành",
+    message: "Account đang chạy job khác",
   },
   {
     test: /profile is disabled/i,
@@ -37,21 +39,19 @@ const ERROR_RULES: { test: RegExp; message: string }[] = [
   },
   {
     test: /MAPS_REVIEW bị chặn|exit IP trùng IP máy|proxy .* auth thất bại|thiếu user\/pass/i,
-    message:
-      "Proxy chưa sẵn sàng — không vào Maps (tránh spam IP máy). Kiểm tra proxy Webshare / user-pass",
+    message: "Proxy chưa sẵn sàng — kiểm tra Webshare",
   },
   {
     test: /browser không còn mở|bấm mở browser/i,
-    message: "Chrome đã đóng — hệ thống sẽ tự mở lại khi bấm Đăng",
+    message: "Chrome đã đóng — bấm Đăng để mở lại",
   },
   {
     test: /chrome chưa mở|browseralive|chưa mở browser|chưa mở chrome/i,
-    message: "Chrome chưa mở — hệ thống sẽ tự mở khi bấm Đăng",
+    message: "Chrome chưa mở — bấm Đăng để mở",
   },
   {
     test: /không tìm thấy nút viết|chỉnh sửa đánh giá/i,
-    message:
-      "Không tìm thấy nút viết đánh giá trên Maps (có thể chưa đăng nhập đúng tài khoản Google)",
+    message: "Không thấy nút viết đánh giá trên Maps",
   },
   {
     test: /không tìm thấy iframe form đánh giá/i,
@@ -59,15 +59,15 @@ const ERROR_RULES: { test: RegExp; message: string }[] = [
   },
   {
     test: /không chọn được.*sao/i,
-    message: "Không chọn được số sao trên form Maps",
+    message: "Không chọn được số sao trên Maps",
   },
   {
     test: /nút đăng chưa sẵn sàng|thiếu sao\/nội dung/i,
-    message: "Form Maps chưa sẵn sàng đăng — kiểm tra sao / nội dung / hộp hủy đánh giá",
+    message: "Form Maps chưa sẵn sàng đăng",
   },
   {
     test: /không nhập được bình luận/i,
-    message: "Không nhập được nội dung bình luận trên Maps",
+    message: "Không nhập được bình luận trên Maps",
   },
   {
     test: /không click đăng/i,
@@ -75,17 +75,15 @@ const ERROR_RULES: { test: RegExp; message: string }[] = [
   },
   {
     test: /thiếu apmprofileid|missing profile/i,
-    message: "Chưa gán account cho bài đăng — lập lại kế hoạch",
+    message: "Chưa gán account — lập lại kế hoạch",
   },
   {
     test: /đã mở Chrome|đưa Chrome lên màn hình/i,
-    message:
-      "Account chưa READY — đã mở Chrome đăng nhập như thêm mail. Hoàn tất rồi bấm Đăng lại",
+    message: "Chưa READY — hoàn tất đăng nhập Chrome rồi Đăng lại",
   },
   {
     test: /account chưa ready|chưa ready/i,
-    message:
-      "Account chưa READY — hệ thống sẽ mở Chrome đăng nhập; hoàn tất rồi bấm Đăng lại",
+    message: "Account chưa READY — đăng nhập Chrome rồi Đăng lại",
   },
   {
     test: /account đang bị lock|lease/i,
@@ -93,22 +91,49 @@ const ERROR_RULES: { test: RegExp; message: string }[] = [
   },
   {
     test: /econnrefused|fetch failed|apm login failed|internal api/i,
-    message:
-      "Không kết nối được máy chủ automation — kiểm tra npm run dev (API + worker) đang chạy",
+    message: "Không kết nối được máy chủ automation",
   },
   {
     test: /invalid lease/i,
-    message: "Job automation hết hạn (lease) — thử đăng lại",
+    message: "Job hết hạn (lease) — thử Đăng lại",
+  },
+  {
+    test: /timeout|timed out|navigation timeout/i,
+    message: "Timeout Maps — thử Đăng lại",
   },
 ];
+
+/** Bỏ URL / backtick dài để không tràn UI. */
+function scrubErrorNoise(text: string): string {
+  return text
+    .replace(/https?:\/\/\S+/gi, "")
+    .replace(/`[^`]*`/g, "")
+    .replace(/\(\s*đang ở\s*\)/gi, "")
+    .replace(/\(\s*\)/g, "")
+    .replace(/\s{2,}/g, " ")
+    .replace(/\s*[—\-–]\s*[—\-–]\s*/g, " — ")
+    .replace(/^\s*[—\-–]\s*|\s*[—\-–]\s*$/g, "")
+    .trim();
+}
+
+function clampMsg(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text;
+  return `${text.slice(0, Math.max(0, maxLen - 1)).trimEnd()}…`;
+}
 
 export function loginIssueMessage(code: string | null | undefined): string | null {
   if (!code) return null;
   return LOGIN_ISSUE_VI[code.toUpperCase()] ?? `Lỗi đăng nhập: ${code}`;
 }
 
-/** Chuẩn hóa thông báo lỗi thô → tiếng Việt dễ hiểu. */
-export function formatReviewError(raw: string | null | undefined): string {
+/**
+ * Chuẩn hóa lỗi thô → tiếng Việt ngắn.
+ * @param maxLen mặc định 90 (UI bảng / Bài lỗi). Truyền lớn hơn nếu cần log.
+ */
+export function formatReviewError(
+  raw: string | null | undefined,
+  maxLen = 90,
+): string {
   if (!raw?.trim()) return "";
   const text = raw.trim();
 
@@ -119,8 +144,8 @@ export function formatReviewError(raw: string | null | undefined): string {
   }
 
   for (const rule of ERROR_RULES) {
-    if (rule.test.test(text)) return rule.message;
+    if (rule.test.test(text)) return clampMsg(rule.message, maxLen);
   }
 
-  return text.length > 220 ? `${text.slice(0, 220)}…` : text;
+  return clampMsg(scrubErrorNoise(text) || text, maxLen);
 }

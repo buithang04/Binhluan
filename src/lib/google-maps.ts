@@ -37,20 +37,26 @@ function extractPlaceNameFromUrl(url: string): string | null {
 }
 
 async function resolveFinalUrl(url: string): Promise<string> {
-  try {
-    const res = await fetch(url, {
-      method: "GET",
-      redirect: "follow",
-      signal: AbortSignal.timeout(4000),
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      },
-    });
-    return res.url || url;
-  } catch {
-    return url;
+  const headers = {
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept-Language": "vi-VN,vi;q=0.9,en;q=0.8",
+  };
+
+  for (const method of ["GET", "HEAD"] as const) {
+    try {
+      const res = await fetch(url, {
+        method,
+        redirect: "follow",
+        signal: AbortSignal.timeout(8000),
+        headers,
+      });
+      if (res.url) return res.url;
+    } catch {
+      /* thử method / lần khác */
+    }
   }
+  return url;
 }
 
 /** Validate + follow redirect only — typically &lt;1s, no Puppeteer. */
@@ -67,23 +73,27 @@ export async function resolveGoogleMapsUrlFast(inputUrl: string): Promise<MapsRe
   }
 
   const resolvedUrl = await resolveFinalUrl(trimmed);
-  const urlLooksValid =
+  // Redirect đôi khi ra consent/login — giữ URL gốc nếu vẫn là Maps
+  const resolvedIsMaps =
     isResolvedMapsPlaceUrl(resolvedUrl) || MAPS_URL_RE.test(resolvedUrl);
+  const finalUrl = resolvedIsMaps ? resolvedUrl : trimmed;
 
-  if (!urlLooksValid) {
+  if (!isResolvedMapsPlaceUrl(finalUrl) && !MAPS_URL_RE.test(finalUrl)) {
     return {
       valid: false,
       validMessage: "Không mở được địa điểm từ link này",
-      resolvedUrl,
+      resolvedUrl: finalUrl,
       info: null,
     };
   }
 
-  const placeName = extractPlaceNameFromUrl(resolvedUrl);
+  const placeName = extractPlaceNameFromUrl(finalUrl);
   return {
     valid: true,
-    validMessage: "Link hợp lệ",
-    resolvedUrl,
+    validMessage: resolvedIsMaps
+      ? "Link hợp lệ"
+      : "Link hợp lệ (redirect Google lệch — dùng link gốc)",
+    resolvedUrl: finalUrl,
     info: placeName
       ? { placeName, currentRating: null, reviewCount: null, source: "url" }
       : null,

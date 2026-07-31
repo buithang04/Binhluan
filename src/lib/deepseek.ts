@@ -22,29 +22,40 @@ export async function callDeepSeekPayload(
   opts?: { baseUrl?: string; apiKey?: string; forceSchema?: boolean },
 ): Promise<{ text: string | null; error?: string }> {
   const apiKey = opts?.apiKey || process.env.DEEPSEEK_API_KEY;
-  let baseUrl =
+  const baseUrl =
     opts?.baseUrl || process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com";
 
   if (!apiKey) {
     return { text: null, error: "Thiếu DEEPSEEK_API_KEY trong .env" };
   }
 
-  // Ép schema đầu ra khi sinh batch star spins
+  // Ép json_object khi sinh batch star spins
   let responseFormat = payload.response_format;
   if (opts?.forceSchema !== false) {
+    responseFormat = STAR_SPIN_RESPONSE_FORMAT;
+  } else {
     const rf = responseFormat as { type?: string } | undefined;
-    if (!rf || rf.type !== "json_schema") {
+    // Prompt cũ còn json_schema → đổi sang json_object (1 call, không retry)
+    if (rf?.type === "json_schema") {
       responseFormat = STAR_SPIN_RESPONSE_FORMAT;
     }
   }
 
-  const buildBody = (rf: unknown | undefined) => ({
-    model: payload.model || "deepseek-v4-flash",
-    messages: payload.messages,
-    temperature: payload.temperature ?? 0.85,
-    max_tokens: payload.max_tokens ?? 2500,
-    ...(rf != null ? { response_format: rf } : {}),
-  });
+  const buildBody = (rf: unknown | undefined) => {
+    const body: Record<string, unknown> = {
+      model: payload.model || "deepseek-v4-flash",
+      messages: payload.messages,
+      max_tokens: payload.max_tokens ?? 100000,
+      ...(rf != null ? { response_format: rf } : {}),
+    };
+   
+    if (opts?.forceSchema !== false) {
+      body.thinking = { type: "disabled" };
+    } else if (payload.temperature != null) {
+      body.temperature = payload.temperature;
+    }
+    return body;
+  };
 
   try {
     const attempt = async (rf: unknown | undefined) => {
@@ -60,33 +71,63 @@ export async function callDeepSeekPayload(
       return { res, errBody };
     };
 
-    let { res, errBody } = await attempt(responseFormat);
+    const { res, errBody } = await attempt(responseFormat);
 
-    // Không tự fallback/retry lần 2 — fail rõ để user bấm Sinh lại (đúng 1 call / lần bấm)
     if (!res.ok) {
-      return {
-        text: null,
-        error: `DeepSeek HTTP ${res.status}: ${errBody.slice(0, 200)} — bấm Sinh lại`,
-      };
+      return { text: null, error: shortDeepSeekHttpError(res.status, errBody) };
     }
 
     const data = (await res.json()) as {
-      choices?: { message?: { content?: string } }[];
-    };
-    const text = data.choices?.[0]?.message?.content?.trim() || null;
-    if (!text) {
-      return {
-        text: null,
-        error: "DeepSeek trả về rỗng — bấm Sinh lại",
+      choices?: {
+        finish_reason?: string;
+        message?: {
+          content?: string | null;
+          reasoning_content?: string | null;
+        };
+      }[];
+      usage?: {
+        completion_tokens_details?: { reasoning_tokens?: number };
       };
+    };
+    const choice = data.choices?.[0];
+    const msg = choice?.message;
+    const text = msg?.content?.trim() || "";
+    // Một số bản trả JSON trong content; nếu rỗng chỉ có reasoning → coi fail rõ
+    if (!text) {
+      const reasoningTok =
+        data.usage?.completion_tokens_details?.reasoning_tokens ?? 0;
+      if (choice?.finish_reason === "length" || reasoningTok > 0) {
+        return {
+          text: null,
+          error: "DeepSeek hết token (thinking) — thử Sinh lại",
+        };
+      }
+      return { text: null, error: "DeepSeek trả về rỗng" };
     }
     return { text };
   } catch (e) {
     return {
       text: null,
-      error: `${e instanceof Error ? e.message : "DeepSeek request failed"} — bấm Sinh lại`,
+      error: e instanceof Error ? e.message.slice(0, 80) : "Lỗi gọi DeepSeek",
     };
   }
+}
+
+function shortDeepSeekHttpError(status: number, errBody: string): string {
+  if (/response_format type is unavailable|json_schema/i.test(errBody)) {
+    return "DeepSeek không hỗ trợ định dạng JSON này";
+  }
+  if (status === 401 || status === 403) return "DeepSeek: sai API key";
+  if (status === 429) return "DeepSeek: quá giới hạn — thử lại sau";
+  if (status >= 500) return "DeepSeek lỗi máy chủ — thử lại";
+  try {
+    const j = JSON.parse(errBody) as { error?: { message?: string } };
+    const msg = j?.error?.message?.trim();
+    if (msg) return `DeepSeek: ${msg.slice(0, 80)}`;
+  } catch {
+    /* ignore */
+  }
+  return `DeepSeek lỗi HTTP ${status}`;
 }
 
 /** Sinh nội dung từ prompt JSON (biểu thức n8n). */
@@ -111,7 +152,7 @@ export async function generateWithPromptJson(
     return { text: null, error: error || "Không resolve được prompt" };
   }
 
-  // Ép model + schema từ cấu hình hệ thống
+  // Ép model + json_object (DeepSeek không hỗ trợ json_schema)
   payload.model = settings.model;
   payload.response_format = STAR_SPIN_RESPONSE_FORMAT;
 

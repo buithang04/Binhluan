@@ -808,12 +808,17 @@ export function ReviewPlanPanel({
             Bài lỗi ({failedAssignments.length})
           </p>
           <ul className="mt-2 max-h-40 space-y-1 overflow-y-auto text-sm text-[var(--ink-soft)]">
-            {failedAssignments.slice(0, 12).map((a) => (
-              <li key={a.id} className="break-all">
-                <strong>#{a.sortOrder + 1}</strong> {a.profileEmail || "—"}:{" "}
-                {formatReviewError(a.error) || assignmentStatusLabel(a.status)}
-              </li>
-            ))}
+            {failedAssignments.slice(0, 12).map((a) => {
+              const err =
+                formatReviewError(a.error, 100) ||
+                assignmentStatusLabel(a.status);
+              return (
+                <li key={a.id} className="truncate" title={err}>
+                  <strong>#{a.sortOrder + 1}</strong> {a.profileEmail || "—"}:{" "}
+                  {err}
+                </li>
+              );
+            })}
             {failedAssignments.length > 12 && (
               <li className="text-[var(--muted)]">
                 … và {failedAssignments.length - 12} bài lỗi khác (xem bảng bên dưới)
@@ -924,16 +929,16 @@ export function ReviewPlanPanel({
                         onPreview={setLightboxSrc}
                       />
                     </td>
-                    <td className="max-w-[220px] py-2 pr-2 align-top">
+                    <td className="w-[160px] max-w-[160px] py-2 pr-2 align-top">
                       <span className="badge badge-neutral" title={a.status}>
                         {assignmentStatusLabel(a.status)}
                       </span>
                       {a.error && (
                         <p
-                          className="mt-1 max-h-24 overflow-y-auto break-all text-xs leading-snug text-[var(--danger)]"
-                          title={formatReviewError(a.error) || undefined}
+                          className="mt-1 line-clamp-2 text-xs leading-snug text-[var(--danger)]"
+                          title={formatReviewError(a.error, 200)}
                         >
-                          {formatReviewError(a.error)}
+                          {formatReviewError(a.error, 72)}
                         </p>
                       )}
                     </td>

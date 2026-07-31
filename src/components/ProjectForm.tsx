@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { MAX_PROJECT_MEDIA } from "@/lib/limits";
 import { MAPS_IMAGE_HINT, prepareMapsImageFile } from "@/lib/maps-image";
@@ -135,6 +135,26 @@ export function ProjectForm({
   );
   /** Chỉ dùng khi create: 1 = Gói & thời gian, 2 = Thông tin doanh nghiệp */
   const [createStep, setCreateStep] = useState<1 | 2>(1);
+  const createStepRef = useRef<1 | 2>(1);
+  /** Chặn click xuyên: sau khi sang bước 2, chưa cho Tạo dự án trong ~450ms */
+  const createArmedAtRef = useRef(0);
+  const [createArmed, setCreateArmed] = useState(false);
+  const [advancing, setAdvancing] = useState(false);
+
+  function goToStep2() {
+    createStepRef.current = 2;
+    setCreateStep(2);
+    setCreateArmed(false);
+    createArmedAtRef.current = Date.now() + 450;
+    window.setTimeout(() => setCreateArmed(true), 450);
+  }
+
+  function goToStep1() {
+    createStepRef.current = 1;
+    setCreateStep(1);
+    setCreateArmed(false);
+    createArmedAtRef.current = 0;
+  }
 
   useEffect(() => {
     if (mode !== "create" || !activeBusiness || filledFromBusiness) return;
@@ -187,7 +207,7 @@ export function ProjectForm({
     setMapsHint("Đang kiểm tra link…");
 
     try {
-      // Fast path: validate + follow redirect (<1s) — không chờ Puppeteer
+      // Fast path: validate + follow redirect — không chờ Puppeteer
       const res = await fetch("/api/projects/resolve-maps", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -202,26 +222,40 @@ export function ProjectForm({
         return false;
       }
 
-      if (data.resolvedUrl && data.resolvedUrl !== url) {
-        setGoogleMapsUrl(data.resolvedUrl);
-      }
+      const resolved = (data.resolvedUrl as string) || url;
+      if (resolved !== url) setGoogleMapsUrl(resolved);
       if (data.placeName && !brandName.trim()) setBrandName(data.placeName);
 
       setMapsStatus("ok");
-      setMapsHint("✓ Link hợp lệ — đang quét sao/lượt đánh giá ở nền…");
+      setMapsHint("✓ Link hợp lệ — đang quét sao/lượt đánh giá…");
       setCheckingMaps(false);
 
-      // Background scrape — không chặn bước tiếp theo / tạo dự án
-      const resolved = data.resolvedUrl || url;
+      // Quét sao ở nền + 1 lần retry; luôn cập nhật hint (không im lặng)
       void (async () => {
-        try {
+        const runScrape = async () => {
           const scrapeRes = await fetch("/api/projects/resolve-maps", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ url: resolved, scrape: true }),
           });
-          const scrape = await scrapeRes.json();
-          if (!scrapeRes.ok || scrape.valid === false) return;
+          return { scrapeRes, scrape: await scrapeRes.json() };
+        };
+
+        try {
+          let { scrapeRes, scrape } = await runScrape();
+          if (!scrapeRes.ok || (scrape.currentRating == null && scrape.reviewCount == null)) {
+            await new Promise((r) => setTimeout(r, 800));
+            ({ scrapeRes, scrape } = await runScrape());
+          }
+
+          if (!scrapeRes.ok) {
+            setMapsStatus("warn");
+            setMapsHint(
+              scrape.error ||
+                "✓ Link hợp lệ — quét sao lỗi. Nhập tay số sao / lượt hoặc bấm Kiểm tra lại.",
+            );
+            return;
+          }
 
           if (scrape.placeName) {
             setBrandName((prev) => (prev.trim() ? prev : scrape.placeName));
@@ -231,13 +265,10 @@ export function ProjectForm({
           const hasRating = scrape.currentRating != null;
           const hasCount = scrape.reviewCount != null;
 
-          if (hasCount) {
-            setReviewCount(String(scrape.reviewCount));
-          }
+          if (hasCount) setReviewCount(String(scrape.reviewCount));
           if (hasRating) {
             setCurrentRating(String(scrape.currentRating));
           } else if (scrape.reviewCount === 0) {
-            // Place chưa có đánh giá → không có điểm TB, dùng 0 để lập kế hoạch
             setCurrentRating("0");
           }
 
@@ -246,23 +277,23 @@ export function ProjectForm({
             setMapsStatus("ok");
             if (scrape.reviewCount === 0) {
               setMapsHint(
-                `✓ Link hợp lệ · place chưa có đánh giá (0 lượt) · ${new Date(scanned).toLocaleString("vi-VN")}`,
+                `✓ Link hợp lệ · chưa có đánh giá (0 lượt) · ${new Date(scanned).toLocaleString("vi-VN")}`,
               );
             } else {
               setMapsHint(
-                `✓ Link hợp lệ · ${scrape.currentRating ?? "—"} sao · ${scrape.reviewCount ?? "—"} lượt · ${new Date(scanned).toLocaleString("vi-VN")}`,
+                `✓ Link hợp lệ · ${scrape.currentRating ?? "—"}★ · ${scrape.reviewCount ?? "—"} lượt · ${new Date(scanned).toLocaleString("vi-VN")}`,
               );
             }
           } else {
             setMapsStatus("warn");
             setMapsHint(
-              "✓ Link hợp lệ — chưa quét được sao/lượt. Nhập tay: 0 lượt nếu place chưa có đánh giá.",
+              "✓ Link hợp lệ — chưa lấy được sao/lượt. Nhập tay hoặc bấm Kiểm tra lại.",
             );
           }
         } catch {
           setMapsStatus("warn");
           setMapsHint(
-            "✓ Link hợp lệ — quét sao chậm/lỗi. Có thể nhập tay số sao và lượt đánh giá.",
+            "✓ Link hợp lệ — quét sao chậm/lỗi. Nhập tay số sao và lượt đánh giá.",
           );
         }
       })();
@@ -313,34 +344,46 @@ export function ProjectForm({
   }
 
   async function goNextStep() {
+    if (advancing) return;
     setError("");
     const err = validateStep1();
     if (err) {
       setError(err);
       return;
     }
-    if (mapsStatus === "idle" && googleMapsUrl.trim()) {
-      const ok = await checkGoogleMaps();
-      if (!ok) {
-        setError("Link Google Maps chưa hợp lệ — kiểm tra lại");
-        return;
+    setAdvancing(true);
+    try {
+      // Luôn kiểm tra lại nếu chưa ok (tránh nhảy khi mapsStatus lỗi/idle)
+      if (mapsStatus !== "ok" && mapsStatus !== "warn") {
+        const ok = await checkGoogleMaps();
+        if (!ok) {
+          setError("Link Google Maps chưa hợp lệ — kiểm tra lại");
+          return;
+        }
       }
+      // Chỉ sang bước 2 — không tạo dự án (kể cả đã có DN Active)
+      goToStep2();
+    } finally {
+      setAdvancing(false);
     }
-    setCreateStep(2);
   }
 
-  async function onSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (mode === "create" && createStep !== 2) {
-      await goNextStep();
-      return;
-    }
+  async function saveProject() {
     setError("");
 
     if (mode === "create") {
+      // Chặn click xuyên từ nút "Tiếp theo" → "Tạo dự án"
+      if (
+        createStepRef.current !== 2 ||
+        !createArmed ||
+        Date.now() < createArmedAtRef.current
+      ) {
+        if (createStepRef.current === 1) await goNextStep();
+        return;
+      }
       const step1Err = validateStep1();
       if (step1Err) {
-        setCreateStep(1);
+        goToStep1();
         setError(step1Err);
         return;
       }
@@ -392,6 +435,15 @@ export function ProjectForm({
     } finally {
       setSaving(false);
     }
+  }
+
+  function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (mode === "create" && createStepRef.current === 1) {
+      void goNextStep();
+      return;
+    }
+    void saveProject();
   }
 
   async function onUpload(file: File, opts?: { silent?: boolean }) {
@@ -689,7 +741,8 @@ export function ProjectForm({
       )}
       {mode === "create" && filledFromBusiness && activeBusiness && (
         <p className="rounded-[var(--radius-sm)] bg-[var(--accent-soft)] px-3 py-2 text-sm text-[var(--accent-ink)]">
-          Đã điền từ doanh nghiệp Active “{activeBusiness.brandName}”. Bạn vẫn có thể chỉnh trước khi lưu.
+          Đã điền từ doanh nghiệp Active “{activeBusiness.brandName}”. Xem lại rồi
+          bấm <strong>Tạo dự án</strong> — bạn vẫn có thể chỉnh trước khi lưu.
         </p>
       )}
       <div className="grid gap-4 sm:grid-cols-2">
@@ -962,19 +1015,48 @@ export function ProjectForm({
             className="btn btn-secondary"
             onClick={() => {
               setError("");
-              setCreateStep(1);
+              goToStep1();
             }}
           >
             Quay lại
           </button>
         )}
-        {mode === "create" && createStep === 1 ? (
-          <button type="button" className="btn btn-primary" onClick={goNextStep}>
-            Tiếp theo
+        {mode === "create" && createStep === 1 && (
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={advancing || checkingMaps}
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              void goNextStep();
+            }}
+          >
+            {advancing || checkingMaps ? "Đang kiểm tra…" : "Tiếp theo"}
           </button>
-        ) : (
-          <button type="submit" disabled={saving} className="btn btn-primary">
-            {saving ? "Đang lưu..." : mode === "create" ? "Tạo dự án" : "Cập nhật"}
+        )}
+        {mode === "create" && createStep === 2 && (
+          <button
+            type="button"
+            disabled={saving || !createArmed}
+            className="btn btn-primary"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              void saveProject();
+            }}
+          >
+            {saving ? "Đang lưu..." : "Tạo dự án"}
+          </button>
+        )}
+        {mode === "edit" && (
+          <button
+            type="button"
+            disabled={saving}
+            className="btn btn-primary"
+            onClick={() => void saveProject()}
+          >
+            {saving ? "Đang lưu..." : "Cập nhật"}
           </button>
         )}
         <button

@@ -89,9 +89,7 @@ export async function POST(_req: Request, ctx: Ctx) {
     if (!okLevels || !Object.keys(spinByStar).length) {
       return NextResponse.json(
         {
-          error:
-            (errors.length ? errors.join("; ") : "Sinh nội dung thất bại") +
-            ` (đã gọi DeepSeek ${apiCalls} lần — bấm Sinh lại để thử, không tự lặp)`,
+          error: errors.length ? errors.join("; ") : "Sinh nội dung thất bại",
           apiCalls,
           starLevels,
         },
@@ -121,7 +119,7 @@ export async function POST(_req: Request, ctx: Ctx) {
   } catch (e) {
     return NextResponse.json(
       {
-        error: `${e instanceof Error ? e.message : "Lỗi không xác định"} — bấm Sinh lại`,
+        error: e instanceof Error ? e.message.slice(0, 100) : "Lỗi không xác định",
       },
       { status: 502 },
     );

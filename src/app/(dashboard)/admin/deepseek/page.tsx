@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   DEFAULT_STAR_SPIN_PROMPT_JSON,
   validatePromptJsonText,
@@ -26,6 +26,15 @@ export default function AdminDeepSeekPage() {
   const [promptError, setPromptError] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [schemaOpen, setSchemaOpen] = useState(false);
+  const promptRef = useRef<HTMLTextAreaElement>(null);
+
+  function fitPromptHeight() {
+    const el = promptRef.current;
+    if (!el) return;
+    el.style.height = "0px";
+    el.style.height = `${Math.max(320, el.scrollHeight + 4)}px`;
+  }
 
   async function load() {
     setLoading(true);
@@ -51,6 +60,24 @@ export default function AdminDeepSeekPage() {
   useEffect(() => {
     void load();
   }, []);
+
+  useEffect(() => {
+    if (!loading) fitPromptHeight();
+  }, [loading, promptJson]);
+
+  useEffect(() => {
+    if (!schemaOpen) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setSchemaOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = prev;
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [schemaOpen]);
 
   function onPromptChange(v: string) {
     setPromptJson(v);
@@ -83,7 +110,7 @@ export default function AdminDeepSeekPage() {
       const s = data.settings as Settings;
       setPromptJson(s.promptJson);
       setModel(s.model);
-      setMessage("Đã lưu — schema đầu ra đã được ép vào response_format");
+      setMessage("Đã lưu cấu hình DeepSeek");
     } catch {
       setError("Không kết nối được máy chủ");
     } finally {
@@ -110,7 +137,7 @@ export default function AdminDeepSeekPage() {
       setBaseUrl(s.baseUrl);
       setPromptJson(s.promptJson);
       setPromptError("");
-      setMessage("Đã reset về mặc định (model + prompt + schema)");
+      setMessage("Đã reset về mặc định");
     } catch {
       setError("Không kết nối được máy chủ");
     } finally {
@@ -120,18 +147,12 @@ export default function AdminDeepSeekPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="page-title">DeepSeek</h1>
-        <p className="page-desc">
-          Cấu hình model + Prompt JSON dùng khi sinh template spin theo sao (1
-          lần call → nhiều mức). Schema đầu ra luôn được ép khi gọi API.
-        </p>
-      </div>
+      <h1 className="page-title">DeepSeek</h1>
 
       {loading ? (
         <p className="text-sm text-[var(--muted)]">Đang tải…</p>
       ) : (
-        <form onSubmit={save} className="panel space-y-4 p-5">
+        <form onSubmit={save} className="panel space-y-4 overflow-visible p-5">
           {error && (
             <p className="rounded-[var(--radius-sm)] bg-[var(--danger-soft)] px-3 py-2 text-sm text-[var(--danger)]">
               {error}
@@ -164,11 +185,18 @@ export default function AdminDeepSeekPage() {
             </label>
           </div>
 
-          <div className="space-y-1">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <p className="text-sm font-medium text-[var(--ink)]">
-                Prompt JSON (messages + biến {"{{ $json... }}"})
-              </p>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm font-medium text-[var(--ink)]">
+              Prompt JSON (messages + biến {"{{ $json... }}"})
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                className="btn btn-secondary !py-1.5 text-xs"
+                onClick={() => setSchemaOpen(true)}
+              >
+                Xem schema đầu ra
+              </button>
               <button
                 type="button"
                 className="btn btn-secondary !py-1.5 text-xs"
@@ -178,33 +206,21 @@ export default function AdminDeepSeekPage() {
                 Reset mặc định
               </button>
             </div>
+          </div>
+
+          <div className="space-y-1">
             <textarea
-              className="input min-h-[280px] font-mono text-xs leading-relaxed"
+              ref={promptRef}
+              className="input w-full resize-y overflow-y-auto font-mono text-sm leading-relaxed"
+              style={{ minHeight: 320 }}
               value={promptJson}
               onChange={(e) => onPromptChange(e.target.value)}
+              onInput={fitPromptHeight}
               spellCheck={false}
             />
             {promptError && (
               <p className="text-xs text-[var(--danger)]">{promptError}</p>
             )}
-          </div>
-
-          <div className="space-y-1">
-            <p className="text-sm font-medium text-[var(--ink)]">
-              Schema đầu ra 
-            </p>
-            <p className="text-xs text-[var(--muted)]">
-              Mỗi lần lưu / gọi API, hệ thống gắn{" "}
-              <code className="font-mono">response_format.json_schema</code> theo
-              cấu trúc này. Model phải trả{" "}
-              <code className="font-mono">
-                {"{ templates: [{ stars, template }] }"}
-              </code>
-              .
-            </p>
-            <pre className="max-h-64 overflow-auto rounded-[var(--radius-sm)] border border-[var(--line)] bg-[var(--surface-muted)] p-3 font-mono text-[11px] text-[var(--ink-soft)]">
-              {schemaJson}
-            </pre>
           </div>
 
           <div className="flex flex-wrap gap-2">
@@ -213,6 +229,42 @@ export default function AdminDeepSeekPage() {
             </button>
           </div>
         </form>
+      )}
+
+      {schemaOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center overflow-hidden overscroll-none bg-black/60 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Schema đầu ra"
+          onClick={() => setSchemaOpen(false)}
+          onWheel={(e) => {
+            // Backdrop / ngoài khung modal: không cuộn trang phía sau
+            if (e.target === e.currentTarget) e.preventDefault();
+          }}
+        >
+          <div
+            className="flex max-h-[85vh] w-full max-w-3xl flex-col overflow-hidden rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface)] shadow-[var(--shadow-md)]"
+            onClick={(e) => e.stopPropagation()}
+            onWheel={(e) => e.stopPropagation()}
+          >
+            <div className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--line)] px-4 py-3">
+              <p className="text-sm font-medium text-[var(--ink)]">
+                Schema đầu ra (tham chiếu)
+              </p>
+              <button
+                type="button"
+                className="btn btn-secondary !py-1.5 text-xs"
+                onClick={() => setSchemaOpen(false)}
+              >
+                Đóng
+              </button>
+            </div>
+            <pre className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 font-mono text-sm leading-relaxed text-[var(--ink-soft)]">
+              {schemaJson}
+            </pre>
+          </div>
+        </div>
       )}
     </div>
   );

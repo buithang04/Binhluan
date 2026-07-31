@@ -93,12 +93,7 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ project }, { status: 201 });
   } catch (e) {
-    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
-      return NextResponse.json(
-        { error: "Bạn đã có dự án với link Google Maps này" },
-        { status: 409 },
-      );
-    }
+    console.error("[projects] create failed", e);
     return NextResponse.json({ error: "Không thể tạo dự án" }, { status: 500 });
   }
 }

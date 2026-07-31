@@ -109,11 +109,19 @@ async function main() {
 
   // Build web trước khi bật API/worker để tránh Prisma query_engine.dll lock trên Windows.
   if (webMode === "prod") {
-    console.log("→ building web (production)...");
-    if (isWin) {
-      sh("cmd", ["/c", "npm run build"], { cwd: root });
+    const skipBuild =
+      process.env.SKIP_WEB_BUILD === "1" ||
+      (existsSync(path.join(root, ".next", "BUILD_ID")) &&
+        process.env.FORCE_WEB_BUILD !== "1");
+    if (skipBuild) {
+      console.log("→ skip web build (đã có .next) — FORCE_WEB_BUILD=1 để build lại");
     } else {
-      sh("npm", ["run", "build"], { cwd: root });
+      console.log("→ building web (production)...");
+      if (isWin) {
+        sh("cmd", ["/c", "npm run build"], { cwd: root });
+      } else {
+        sh("npm", ["run", "build"], { cwd: root });
+      }
     }
   }
 
