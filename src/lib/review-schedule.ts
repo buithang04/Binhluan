@@ -27,6 +27,31 @@ export function vnMinCampaignStartDate(now = new Date()): string {
   return vnCalendarDateString(now);
 }
 
+/** true khi hôm nay (VN) đã qua ngày kết thúc chiến dịch trong gói. */
+export function isCampaignEndDatePassed(
+  endAt: Date | string,
+  now = new Date(),
+): boolean {
+  const endYmd =
+    typeof endAt === "string" && /^\d{4}-\d{2}-\d{2}$/.test(endAt.trim())
+      ? endAt.trim()
+      : vnCalendarDateString(typeof endAt === "string" ? new Date(endAt) : endAt);
+  return vnCalendarDateString(now) > endYmd;
+}
+
+export function campaignEndDatePassedMessage(endAt: Date | string): string {
+  const endYmd =
+    typeof endAt === "string" && /^\d{4}-\d{2}-\d{2}$/.test(endAt.trim())
+      ? endAt.trim()
+      : vnCalendarDateString(typeof endAt === "string" ? new Date(endAt) : endAt);
+  return `Chiến dịch đã hết hạn (kết thúc ${endYmdDisplay(endYmd)}) — gia hạn ngày kết thúc trên dự án rồi lập kế hoạch lại`;
+}
+
+function endYmdDisplay(ymd: string): string {
+  const [y, m, d] = ymd.split("-");
+  return `${d}/${m}/${y}`;
+}
+
 /** Đầu ngày theo lịch VN (UTC instant). */
 function startOfVnDay(value: Date): number {
   const parts = new Intl.DateTimeFormat("en-CA", {

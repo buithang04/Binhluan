@@ -14,6 +14,9 @@ import { pickRandomMediaAssets, enrichPlanAssignments } from "@/lib/review-media
 import {
   adjustScheduleForProfileReuse,
   clampScheduleNotBefore,
+  campaignEndDatePassedMessage,
+  formatScheduleDate,
+  isCampaignEndDatePassed,
   planReviewScheduleDates,
 } from "@/lib/review-schedule";
 import {
@@ -24,6 +27,10 @@ import {
 import { resolveProjectPlaceKey } from "@/lib/place-key";
 
 type Ctx = { params: Promise<{ id: string }> };
+
+function formatScheduleHint(when: Date): string {
+  return formatScheduleDate(when);
+}
 
 async function getProject(id: string, userId: string, isAdmin: boolean) {
   return prisma.project.findFirst({
@@ -166,6 +173,21 @@ export async function POST(req: Request, ctx: Ctx) {
     );
   }
 
+  const now = new Date();
+  if (isCampaignEndDatePassed(project.endAt, now)) {
+    return NextResponse.json(
+      { error: campaignEndDatePassedMessage(project.endAt) },
+      { status: 400 },
+    );
+  }
+
+  if (project.endAt < project.startAt) {
+    return NextResponse.json(
+      { error: "Ngày kết thúc phải nằm trong khoảng thời gian dự án" },
+      { status: 400 },
+    );
+  }
+
   const placeKey = resolveProjectPlaceKey(project.googleMapsUrl, project.placeKey);
   if (!project.placeKey) {
     await prisma.project.update({
@@ -189,11 +211,12 @@ export async function POST(req: Request, ctx: Ctx) {
       },
     },
   });
-  const completedKeep = existingPlan?.assignments.filter((a) => a.status === "COMPLETED") ?? [];
-  const preservePending = existingPlan?.assignments.filter((a) =>
+  const completedKeep = [...(existingPlan?.assignments.filter((a) => a.status === "COMPLETED") ?? [])].sort(
+    (a, b) => a.sortOrder - b.sortOrder,
+  );
+  const preservePending = [...(existingPlan?.assignments.filter((a) =>
     ["PENDING", "FAILED"].includes(a.status),
-  ) ?? [];
-  const preserveBySort = new Map(preservePending.map((a) => [a.sortOrder, a]));
+  ) ?? [])].sort((a, b) => a.sortOrder - b.sortOrder);
   const remainingSlots = Math.max(0, reviewsToPost - completedKeep.length);
   if (remainingSlots === 0) {
     return NextResponse.json(
@@ -204,7 +227,6 @@ export async function POST(req: Request, ctx: Ctx) {
     );
   }
 
-  const now = new Date();
   const blockedAtPlace = await getBlockedProfileIdsForPlace(placeKey);
   for (const c of completedKeep) {
     if (c.apmProfileId) blockedAtPlace.add(c.apmProfileId);
@@ -231,36 +253,33 @@ export async function POST(req: Request, ctx: Ctx) {
     excludeForPick,
   );
 
-  if (project.endAt < now) {
-    return NextResponse.json(
-      { error: "Chiến dịch đã hết hạn (ngày kết thúc đã qua) — gia hạn endAt trước khi lập kế hoạch" },
-      { status: 400 },
-    );
-  }
-
-  const profileIdsForSchedule: string[] = [];
-  for (let i = 0; i < reviewsToPost; i++) {
-    if (i < completedKeep.length) {
-      profileIdsForSchedule.push(completedKeep[i]!.apmProfileId ?? `done-${i}`);
-    } else {
-      const slotIdx = i - completedKeep.length;
-      const preserved = preserveBySort.get(i);
-      let pid = assignedProfiles[slotIdx]?.id ?? null;
-      if (preserved?.apmProfileId) {
-        const stillOk =
-          !blockedAtPlace.has(preserved.apmProfileId) &&
-          !excludeForPick.has(preserved.apmProfileId);
-        if (stillOk) pid = preserved.apmProfileId;
-      }
-      profileIdsForSchedule.push(pid ?? `empty-${i}`);
+  const profileIdsForNewSlots: string[] = [];
+  for (let i = 0; i < remainingSlots; i++) {
+    const preserved = preservePending[i];
+    let pid = assignedProfiles[i]?.id ?? null;
+    if (preserved?.apmProfileId) {
+      const stillOk =
+        !blockedAtPlace.has(preserved.apmProfileId) &&
+        !excludeForPick.has(preserved.apmProfileId);
+      if (stillOk) pid = preserved.apmProfileId;
     }
+    profileIdsForNewSlots.push(pid ?? `empty-${i}`);
   }
 
+  /** Lần đầu: từ max(hôm nay, startAt). Lập lại: chỉ phân bổ từ thời điểm lập → endAt. */
+  const effectiveScheduleStart = existingPlan
+    ? now
+    : new Date(Math.max(now.getTime(), project.startAt.getTime()));
   const minProfileGapMs = 6 * 60 * 60_000;
-  const scheduleDates = clampScheduleNotBefore(
+  const scheduleDatesForNew = clampScheduleNotBefore(
     adjustScheduleForProfileReuse(
-      planReviewScheduleDates(project.startAt, project.endAt, reviewsToPost, now),
-      profileIdsForSchedule,
+      planReviewScheduleDates(
+        effectiveScheduleStart,
+        project.endAt,
+        remainingSlots,
+        now,
+      ),
+      profileIdsForNewSlots,
       minProfileGapMs,
     ),
     now,
@@ -288,15 +307,8 @@ export async function POST(req: Request, ctx: Ctx) {
 
   const media = project.media;
 
-  if (project.endAt < project.startAt) {
-    return NextResponse.json(
-      { error: "Ngày kết thúc phải nằm trong khoảng thời gian dự án" },
-      { status: 400 },
-    );
-  }
-
   const newAssignmentsData = newSlots.map((slot, i) => {
-    const globalIndex = completedKeep.length + i;
+    const sortOrder = completedKeep.length + i;
     const reviewText = resolveReviewTextForStar(
       slot.stars,
       spinByStar,
@@ -305,7 +317,7 @@ export async function POST(req: Request, ctx: Ctx) {
     );
     const pickedMedia = media.length ? pickRandomMediaAssets(media) : [];
     let profile = assignedProfiles[i];
-    const preserved = preserveBySort.get(globalIndex);
+    const preserved = preservePending[i];
     if (preserved?.apmProfileId) {
       const stillOk =
         !blockedAtPlace.has(preserved.apmProfileId) &&
@@ -321,16 +333,15 @@ export async function POST(req: Request, ctx: Ctx) {
       }
     }
     return {
-      sortOrder: globalIndex,
+      sortOrder,
       stars: slot.stars,
       reviewText,
       mediaAssetId: pickedMedia[0]?.id ?? null,
       mediaAssetIds: pickedMedia.map((m) => m.id),
       scheduledAt:
-        preserved?.scheduledAt ??
-        scheduleDates[globalIndex] ??
-        scheduleDates[scheduleDates.length - 1] ??
-        project.startAt,
+        scheduleDatesForNew[i] ??
+        scheduleDatesForNew[scheduleDatesForNew.length - 1] ??
+        effectiveScheduleStart,
       apmProfileId: profile?.id ?? null,
       profileEmail: profile?.account.email ?? null,
       status: "PENDING" as const,
@@ -370,6 +381,12 @@ export async function POST(req: Request, ctx: Ctx) {
     });
 
     if (existingPlan) {
+      for (let i = 0; i < completedKeep.length; i++) {
+        await tx.reviewAssignment.update({
+          where: { id: completedKeep[i]!.id },
+          data: { sortOrder: i },
+        });
+      }
       await tx.reviewAssignment.deleteMany({
         where: {
           planId: existingPlan.id,
@@ -426,9 +443,9 @@ export async function POST(req: Request, ctx: Ctx) {
 
   let message: string | undefined;
   if (completedKeep.length > 0) {
-    message = `Đã giữ ${completedKeep.length} bài hoàn thành, lập ${newAssignmentsData.length} bài còn lại — gán ${assignedCount} mail`;
+    message = `Đã giữ ${completedKeep.length} bài hoàn thành (đầu danh sách), lập ${newAssignmentsData.length} bài còn lại từ ${formatScheduleHint(now)} — gán ${assignedCount} mail`;
   } else {
-    message = `Đã lập kế hoạch — gán ${assignedCount}/${remainingSlots} mail (1 mail / 1 bình luận / địa điểm)`;
+    message = `Đã lập kế hoạch từ ${formatScheduleHint(now)} — gán ${assignedCount}/${remainingSlots} mail (1 mail / 1 bình luận / địa điểm)`;
   }
   if (unassignedSlots > 0) {
     message += `. ${unassignedSlots} bài chưa có mail — bổ sung account hoặc chọn mail thủ công.`;

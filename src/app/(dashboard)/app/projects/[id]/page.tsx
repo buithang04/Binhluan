@@ -158,6 +158,7 @@ export default async function ProjectDetailPage({ params }: Props) {
           initialInfraWarnings: [],
           initialAvailableProxyCount: null,
           initialRatingScannedAt: project.ratingScannedAt?.toISOString() ?? null,
+          campaignEndAt: project.endAt.toISOString(),
         }}
       />
     </div>

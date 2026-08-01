@@ -13,6 +13,8 @@ import {
 } from "@/lib/review-media";
 import {
   clampScheduleNotBefore,
+  campaignEndDatePassedMessage,
+  isCampaignEndDatePassed,
   planReviewScheduleDates,
 } from "@/lib/review-schedule";
 
@@ -55,6 +57,14 @@ export async function GET(req: Request, ctx: Ctx) {
   }
 
   const reviewsToPost = project.package.targetContents;
+  const now = new Date();
+  if (isCampaignEndDatePassed(project.endAt, now)) {
+    return NextResponse.json(
+      { error: campaignEndDatePassedMessage(project.endAt) },
+      { status: 400 },
+    );
+  }
+
   const planned = planReviewStars({
     currentRating:
       project.currentRating != null ? Number(project.currentRating) : 0,
@@ -64,10 +74,12 @@ export async function GET(req: Request, ctx: Ctx) {
   });
 
   const spinByStar = parseReviewSpinByStar(project.reviewSpinByStar);
-  const now = new Date();
+  const effectiveScheduleStart = new Date(
+    Math.max(now.getTime(), project.startAt.getTime()),
+  );
   const scheduleDates = clampScheduleNotBefore(
     planReviewScheduleDates(
-      project.startAt,
+      effectiveScheduleStart,
       project.endAt,
       Math.min(limit, planned.slots.length),
       now,

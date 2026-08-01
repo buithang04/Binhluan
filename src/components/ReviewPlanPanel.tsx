@@ -9,8 +9,10 @@ import {
 } from "@/lib/review-media";
 import {
   assignmentStatusLabel,
+  campaignEndDatePassedMessage,
   formatScheduleDate,
   getScheduleState,
+  isCampaignEndDatePassed,
   scheduleStateLabel,
 } from "@/lib/review-schedule";
 import { readApiJson } from "@/lib/api-client";
@@ -156,12 +158,15 @@ export function ReviewPlanPanel({
   initialInfraWarnings = [],
   initialAvailableProxyCount = null,
   initialRatingScannedAt = null,
+  campaignEndAt = null,
 }: {
   projectId: string;
   packageTargetContents: number;
   /** SSR — tránh blocker giả “chưa có ảnh” khi reload */
   initialMediaCount?: number;
   initialContentGenerated?: boolean;
+  /** ISO hoặc YYYY-MM-DD — chặn lập kế hoạch khi quá ngày kết thúc gói */
+  campaignEndAt?: string | null;
   /** SSR từ ReviewPlan đã lưu DB — bảng hiện ngay, không chờ API */
   initialPlan?: Plan | null;
   initialStarPreview?: StarPlan | null;
@@ -462,6 +467,9 @@ export function ReviewPlanPanel({
     }
     if (mediaCount === 0) {
       planBlockers.push("Chưa có ảnh trong thư viện dự án");
+    }
+    if (campaignEndAt && isCampaignEndDatePassed(campaignEndAt)) {
+      planBlockers.push(campaignEndDatePassedMessage(campaignEndAt));
     }
   }
 
