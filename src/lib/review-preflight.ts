@@ -177,11 +177,7 @@ export async function getReviewInfraWarnings(now = new Date()) {
   }
 
   if (readyNoBrowser > 0) {
-    warnings.push({
-      id: "no-browser",
-      severity: "warn",
-      message: `${readyNoBrowser} account Chrome đang đóng — khi đăng hệ thống sẽ tự mở lại`,
-    });
+    /* Chrome đóng vẫn OK — worker MAPS tự mở; không cảnh báo trên UI kế hoạch. */
   }
 
   return { warnings, proxyCount, readyNoBrowser };

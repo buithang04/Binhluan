@@ -4,6 +4,7 @@ import { Prisma } from "@prisma/client";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { projectUpdateSchema, formatZodFlatten } from "@/lib/validations";
+import { buildProjectPlaceFields } from "@/lib/project-place-fields";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -68,6 +69,15 @@ export async function PUT(req: Request, ctx: Ctx) {
       return NextResponse.json({ error: "Gói không tồn tại" }, { status: 400 });
     }
 
+    const placeFields = buildProjectPlaceFields(
+      {
+        googleMapsUrl: data.googleMapsUrl,
+        placeKey: data.placeKey,
+        resolvedUrl: data.resolvedUrl,
+      },
+      existing,
+    );
+
     const project = await prisma.$transaction(async (tx) => {
       await tx.product.deleteMany({ where: { projectId: id } });
       return tx.project.update({
@@ -81,6 +91,11 @@ export async function PUT(req: Request, ctx: Ctx) {
           targetMarket: data.targetMarket,
           writingNotes: data.writingNotes,
           googleMapsUrl: data.googleMapsUrl,
+          placeKey: placeFields.placeKey,
+          resolvedUrl: placeFields.resolvedUrl,
+          ...(placeFields.placeResolvedAt
+            ? { placeResolvedAt: placeFields.placeResolvedAt }
+            : {}),
           desiredRating:
             data.desiredRating === null
               ? null
@@ -94,7 +109,6 @@ export async function PUT(req: Request, ctx: Ctx) {
             ? new Date(data.ratingScannedAt)
             : undefined,
           reviewsToPost: pkg.targetContents,
-          proxyCooldownMinutes: data.proxyCooldownMinutes,
           startAt: new Date(data.startAt),
           endAt: new Date(data.endAt),
           products: {

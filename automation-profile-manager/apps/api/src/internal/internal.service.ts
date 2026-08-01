@@ -6,6 +6,10 @@ import {
 import { decryptSecret } from "@apm/crypto";
 import { PrismaService } from "../prisma/prisma.service";
 import { LiveEventsService } from "../events/live-events.service";
+import {
+  loadAssignmentPlaceContext,
+  upsertProfilePlaceReviewTx,
+} from "./profile-place-review";
 
 @Injectable()
 export class InternalService {
@@ -13,6 +17,16 @@ export class InternalService {
     private readonly prisma: PrismaService,
     private readonly live: LiveEventsService,
   ) {}
+
+  /** Cooldown sau MAPS — cấu hình tại Admin → Proxy (SystemSetting). */
+  private async mapsProxyCooldownMinutes(): Promise<number> {
+    const row = await this.prisma.systemSetting.findUnique({
+      where: { key: "maps_proxy_cooldown_minutes" },
+    });
+    const n = row ? Number(row.value) : 60;
+    if (!Number.isFinite(n) || n < 0) return 60;
+    return Math.min(10080, Math.floor(n));
+  }
 
   /** Giải phóng proxy lock. Chỉ đặt cooldown khi đăng Maps thành công. */
   private async releaseJobProxy(
@@ -29,13 +43,9 @@ export class InternalService {
   ) {
     if (!job?.proxyId || job.taskCode !== "MAPS_REVIEW") return;
     const applyCooldown = opts?.applyCooldown === true;
-    const payload = (job.payload ?? {}) as { proxyCooldownMinutes?: number | null };
-    const cooldownMinutes =
-      applyCooldown && typeof payload.proxyCooldownMinutes === "number"
-        ? Math.max(0, payload.proxyCooldownMinutes)
-        : applyCooldown
-          ? 60
-          : 0;
+    const cooldownMinutes = applyCooldown
+      ? await this.mapsProxyCooldownMinutes()
+      : 0;
     const now = new Date();
     await this.prisma.proxy.updateMany({
       where: { id: job.proxyId, lockedByJobId: job.id },
@@ -320,6 +330,34 @@ export class InternalService {
               apmJobRunId: input.jobRunId,
             },
           });
+          try {
+            const ctx = await loadAssignmentPlaceContext(
+              this.prisma,
+              assignmentId,
+            );
+            if (ctx?.assignment.apmProfileId) {
+              await upsertProfilePlaceReviewTx(tx, {
+                profileId: ctx.assignment.apmProfileId,
+                accountEmail: ctx.assignment.profileEmail ?? "",
+                placeKey: ctx.placeKey,
+                placeName: ctx.project.brandName,
+                googleMapsUrl: ctx.project.googleMapsUrl,
+                resolvedUrl: ctx.project.resolvedUrl,
+                stars: ctx.assignment.stars,
+                reviewText: ctx.assignment.reviewText,
+                reviewLink,
+                assignmentId,
+                projectId: ctx.project.id,
+                source: "POSTED",
+                visibility: reviewLink ? "UNKNOWN" : "VISIBLE",
+              });
+            }
+          } catch (ledgerErr) {
+            console.warn(
+              "[internal] ledger upsert failed (review still COMPLETED):",
+              ledgerErr instanceof Error ? ledgerErr.message : ledgerErr,
+            );
+          }
           const plan = await tx.reviewAssignment.findUnique({
             where: { id: assignmentId },
             select: { planId: true },
@@ -410,14 +448,47 @@ export class InternalService {
       if (job?.taskCode === "MAPS_REVIEW") {
         const payload = (job.payload ?? {}) as { assignmentId?: string };
         if (payload.assignmentId) {
+          const transientChrome =
+            /devtools|reconnect|không reconnect|chờ job trước|chờ Chrome|Chrome kẹt|launch conflict|treo quá/i.test(
+              input.error,
+            );
           await tx.reviewAssignment.update({
             where: { id: payload.assignmentId },
             data: {
-              status: "FAILED",
+              status: transientChrome ? "PENDING" : "FAILED",
               error: input.error.slice(0, 2000),
               apmJobRunId: input.jobRunId,
             },
           });
+          if (/ALREADY_REVIEWED_AT_PLACE/i.test(input.error)) {
+            try {
+              const ctx = await loadAssignmentPlaceContext(
+                this.prisma,
+                payload.assignmentId,
+              );
+              if (ctx?.assignment.apmProfileId) {
+                await upsertProfilePlaceReviewTx(tx, {
+                  profileId: ctx.assignment.apmProfileId,
+                  accountEmail: ctx.assignment.profileEmail ?? "",
+                  placeKey: ctx.placeKey,
+                  placeName: ctx.project.brandName,
+                  googleMapsUrl: ctx.project.googleMapsUrl,
+                  resolvedUrl: ctx.project.resolvedUrl,
+                  stars: ctx.assignment.stars,
+                  reviewText: ctx.assignment.reviewText,
+                  assignmentId: payload.assignmentId,
+                  projectId: ctx.project.id,
+                  source: "DETECTED_ABORT",
+                  visibility: "VISIBLE",
+                });
+              }
+            } catch (ledgerErr) {
+              console.warn(
+                "[internal] ledger on ALREADY_REVIEWED failed:",
+                ledgerErr instanceof Error ? ledgerErr.message : ledgerErr,
+              );
+            }
+          }
           const planId = (
             await tx.reviewAssignment.findUnique({
               where: { id: payload.assignmentId },

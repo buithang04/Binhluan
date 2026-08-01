@@ -120,11 +120,14 @@ export function normalizeStarKey(stars: string | number): string | null {
   return Number.isFinite(n) ? String(n) : null;
 }
 
-/** Profile có thể gán cho kế hoạch review (browser mở khi chạy job, không cần lúc lập kế hoạch). */
+/** Profile có thể gán cho kế hoạch review — READY, không lock, không cần verify lại. */
 export function availableReviewProfileWhere(now = new Date()) {
   return {
     status: "READY" as const,
-    account: { status: "READY" as const },
+    account: {
+      status: "READY" as const,
+      loginIssue: null,
+    },
     OR: [{ leaseUntil: null }, { leaseUntil: { lt: now } }],
   };
 }
@@ -150,7 +153,30 @@ export function prioritizeProfilesWith2Fa<
   return [...shuffleInPlace(with2fa), ...shuffleInPlace(without2fa)];
 }
 
-/** Gán profile cho từng bài — thiếu mail thì xoay vòng (1 mail có thể nhiều bài). */
+/** Gán profile duy nhất — thiếu mail thì null (không xoay vòng). 1 mail / 1 địa điểm. */
+export function pickUniqueProfilesForPlan<
+  T extends { id: string; account: { email: string } },
+>(
+  pool: T[],
+  count: number,
+  excludeProfileIds: ReadonlySet<string> = new Set(),
+): (T | null)[] {
+  if (count <= 0) return [];
+  const used = new Set(excludeProfileIds);
+  const result: (T | null)[] = [];
+  for (let i = 0; i < count; i++) {
+    const pick = pool.find((p) => !used.has(p.id));
+    if (pick) {
+      result.push(pick);
+      used.add(pick.id);
+    } else {
+      result.push(null);
+    }
+  }
+  return result;
+}
+
+/** @deprecated Chỉ dùng cho lịch gap khi cần — không gán mail. */
 export function pickProfilesForReviewPlan<
   T extends { id: string; account: { email: string } },
 >(pool: T[], count: number, startIndex = 0): T[] {

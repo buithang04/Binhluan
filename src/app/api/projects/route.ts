@@ -4,6 +4,7 @@ import { Prisma } from "@prisma/client";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { projectCreateSchema, formatZodFlatten } from "@/lib/validations";
+import { buildProjectPlaceFields } from "@/lib/project-place-fields";
 
 export async function GET() {
   const session = await getServerSession(authOptions);
@@ -51,6 +52,12 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Gói không tồn tại" }, { status: 400 });
     }
 
+    const placeFields = buildProjectPlaceFields({
+      googleMapsUrl: data.googleMapsUrl,
+      placeKey: data.placeKey,
+      resolvedUrl: data.resolvedUrl,
+    });
+
     const project = await prisma.project.create({
       data: {
         userId: session.user.id,
@@ -62,6 +69,9 @@ export async function POST(req: Request) {
         targetMarket: data.targetMarket,
         writingNotes: data.writingNotes,
         googleMapsUrl: data.googleMapsUrl,
+        placeKey: placeFields.placeKey,
+        resolvedUrl: placeFields.resolvedUrl,
+        placeResolvedAt: placeFields.placeResolvedAt ?? null,
         desiredRating:
           data.desiredRating === null
             ? null
@@ -77,7 +87,6 @@ export async function POST(req: Request) {
             ? new Date()
             : null,
         reviewsToPost: pkg.targetContents,
-        proxyCooldownMinutes: data.proxyCooldownMinutes,
         startAt: new Date(data.startAt),
         endAt: new Date(data.endAt),
         status: "DRAFT",

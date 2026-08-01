@@ -59,6 +59,36 @@ function formatImageSummary(tally: Record<number, number>) {
     .join(", ");
 }
 
+function reviewVisibilityLabel(v: string | null | undefined): string {
+  switch (v) {
+    case "VISIBLE":
+      return "Còn hiển thị";
+    case "DELETED":
+      return "Đã mất";
+    case "HIDDEN":
+      return "Ẩn";
+    case "UNKNOWN":
+      return "Chưa rõ";
+    default:
+      return "";
+  }
+}
+
+function reviewVisibilityBadgeClass(v: string | null | undefined): string {
+  switch (v) {
+    case "VISIBLE":
+      return "badge badge-accent";
+    case "DELETED":
+      return "badge badge-neutral text-[var(--danger)]";
+    case "HIDDEN":
+      return "badge badge-neutral text-[var(--warn-ink)]";
+    case "UNKNOWN":
+      return "badge badge-neutral";
+    default:
+      return "badge badge-neutral";
+  }
+}
+
 function assignmentMedia(a: Assignment): MediaThumb[] {
   if (a.mediaAssets?.length) return a.mediaAssets;
   const ids = parseMediaAssetIds(a.mediaAssetIds);
@@ -99,6 +129,20 @@ function MediaThumbs({
 }
 
 type InfraWarning = { id: string; message: string; severity: "warn" | "error" };
+
+type EligibleSnap = {
+  unassignedSlots: number;
+  eligibleCount: number;
+  blockedAtPlaceCount: number;
+  readyTotalCount: number;
+  profiles: Array<{
+    id: string;
+    email: string;
+    disabled?: boolean;
+    disabledReason?: string;
+  }>;
+  updatedAt: string;
+};
 
 export function ReviewPlanPanel({
   projectId,
@@ -151,6 +195,10 @@ export function ReviewPlanPanel({
   const [busy, setBusy] = useState(false);
   const [postingId, setPostingId] = useState<string | null>(null);
   const [savingScheduleId, setSavingScheduleId] = useState<string | null>(null);
+  const [savingProfileId, setSavingProfileId] = useState<string | null>(null);
+  const [verifyingId, setVerifyingId] = useState<string | null>(null);
+  const [verifyAllBusy, setVerifyAllBusy] = useState(false);
+  const [eligibleSnap, setEligibleSnap] = useState<EligibleSnap | null>(null);
   const [error, setError] = useState("");
   const [msg, setMsg] = useState("");
   const hydratedFromServer =
@@ -164,6 +212,48 @@ export function ReviewPlanPanel({
   const loadGen = useRef(0);
   const hydrated = useHydrated();
   const clientNow = hydrated ? new Date() : null;
+
+  useEffect(() => {
+    setMediaCount(initialMediaCount);
+  }, [initialMediaCount]);
+
+  /** Đổi dự án — reset state, tránh lẫn kế hoạch dự án khác. */
+  useEffect(() => {
+    loadGen.current += 1;
+    setPlan(initialPlan);
+    setStarPreview(initialStarPreview);
+    setBlockers(initialBlockers);
+    setContentGenerated(initialContentGenerated);
+    setRatingScannedAt(initialRatingScannedAt ?? null);
+    setReadyProfileCount(initialReadyProfileCount ?? null);
+    setInfraWarnings(initialInfraWarnings);
+    setAvailableProxyCount(initialAvailableProxyCount ?? null);
+    setEligibleSnap(null);
+    setError("");
+    setMsg("");
+    setInitialLoading(!initialPlan && !initialStarPreview && initialBlockers.length === 0);
+  }, [
+    projectId,
+    initialPlan,
+    initialStarPreview,
+    initialBlockers,
+    initialContentGenerated,
+    initialRatingScannedAt,
+    initialReadyProfileCount,
+    initialInfraWarnings,
+    initialAvailableProxyCount,
+  ]);
+
+  const loadEligible = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/projects/${projectId}/eligible-profiles`);
+      if (!res.ok) return;
+      const data = (await res.json()) as EligibleSnap;
+      setEligibleSnap(data);
+    } catch {
+      /* ignore */
+    }
+  }, [projectId]);
 
   const load = useCallback(async (opts?: { light?: boolean }) => {
     const light = opts?.light === true;
@@ -182,6 +272,8 @@ export function ReviewPlanPanel({
               reviewLink: string | null;
               error: string | null;
               scheduledAt?: string | null;
+              apmProfileId?: string | null;
+              profileEmail?: string | null;
             }>;
           } | null;
           mediaCount?: number;
@@ -214,6 +306,8 @@ export function ReviewPlanPanel({
                   reviewLink: u.reviewLink,
                   error: u.error,
                   scheduledAt: u.scheduledAt ?? a.scheduledAt,
+                  apmProfileId: u.apmProfileId ?? a.apmProfileId,
+                  profileEmail: u.profileEmail ?? a.profileEmail,
                 };
               }),
             };
@@ -343,6 +437,16 @@ export function ReviewPlanPanel({
     return () => clearInterval(t);
   }, [plan?.id, plan?.status, load]);
 
+  useEffect(() => {
+    if (!plan) return;
+    void loadEligible();
+    const t = setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      void loadEligible();
+    }, 30_000);
+    return () => clearInterval(t);
+  }, [plan?.id, loadEligible]);
+
   const snapshotPlan = normalizeStarPlan(plan?.snapshot);
   const displayPlan = snapshotPlan ?? starPreview;
 
@@ -354,11 +458,6 @@ export function ReviewPlanPanel({
     if (!contentGenerated) {
       planBlockers.push(
         "Chưa sinh nội dung bình luận theo sao — làm ở phần Nội dung bình luận phía trên",
-      );
-    }
-    if (readyProfileCount != null && readyProfileCount === 0) {
-      planBlockers.push(
-        "Cần ít nhất 1 mail READY (không đang lock) để lập kế hoạch",
       );
     }
     if (mediaCount === 0) {
@@ -436,6 +535,7 @@ export function ReviewPlanPanel({
       );
       setPreviewSamples(null);
       void load();
+      void loadEligible();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Không kết nối được máy chủ");
     } finally {
@@ -500,6 +600,117 @@ export function ReviewPlanPanel({
     }
   }
 
+  async function saveAssignmentProfile(assignmentId: string, apmProfileId: string) {
+    setError("");
+    setMsg("");
+    setSavingProfileId(assignmentId);
+    try {
+      const res = await fetch(
+        `/api/projects/${projectId}/review-plan/assignments/${assignmentId}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ apmProfileId: apmProfileId || null }),
+        },
+      );
+      const data = await readApiJson<{ error?: string; plan?: Plan; message?: string }>(res);
+      if (!res.ok) {
+        setError(data.error || "Gán mail thất bại");
+        return;
+      }
+      setPlan(data.plan ?? null);
+      setMsg(data.message || "Đã gán mail");
+      void loadEligible();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Không kết nối được máy chủ");
+    } finally {
+      setSavingProfileId(null);
+    }
+  }
+
+  async function fillEmptyProfiles() {
+    setError("");
+    setMsg("");
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/projects/${projectId}/review-plan/fill-profiles`, {
+        method: "POST",
+      });
+      const data = await readApiJson<{ error?: string; plan?: Plan; message?: string }>(res);
+      if (!res.ok) {
+        setError(data.error || "Tự gán mail thất bại");
+        return;
+      }
+      setPlan(data.plan ?? null);
+      setMsg(data.message || "Đã gán mail");
+      void loadEligible();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Không kết nối được máy chủ");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function verifyAssignment(assignmentId: string) {
+    setError("");
+    setMsg("");
+    setVerifyingId(assignmentId);
+    try {
+      const res = await fetch(
+        `/api/projects/${projectId}/review-plan/assignments/${assignmentId}/verify-review`,
+        { method: "POST" },
+      );
+      const data = await readApiJson<{
+        error?: string;
+        visibility?: string;
+        detail?: string;
+        message?: string;
+      }>(res);
+      if (!res.ok) {
+        setError(data.error || "Quét review thất bại");
+        return;
+      }
+      setMsg(
+        `Quét xong: ${reviewVisibilityLabel(data.visibility) || data.visibility}${data.detail ? ` — ${data.detail}` : ""}`,
+      );
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Không kết nối được máy chủ");
+    } finally {
+      setVerifyingId(null);
+    }
+  }
+
+  async function verifyAllCompleted() {
+    setError("");
+    setMsg("");
+    setVerifyAllBusy(true);
+    try {
+      const res = await fetch(`/api/projects/${projectId}/review-plan/verify-all`, {
+        method: "POST",
+      });
+      const data = await readApiJson<{
+        error?: string;
+        checked?: number;
+        summary?: Record<string, number>;
+        message?: string;
+      }>(res);
+      if (!res.ok) {
+        setError(data.error || "Quét hàng loạt thất bại");
+        return;
+      }
+      const parts = Object.entries(data.summary ?? {})
+        .map(([k, n]) => `${reviewVisibilityLabel(k) || k}: ${n}`)
+        .join(" · ");
+      setMsg(data.message + (parts ? ` (${parts})` : ""));
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Không kết nối được máy chủ");
+    } finally {
+      setVerifyAllBusy(false);
+    }
+  }
+
   async function saveAssignmentSchedule(assignmentId: string, localValue: string) {
     if (!localValue) return;
     setError("");
@@ -561,6 +772,8 @@ export function ReviewPlanPanel({
 
   const failedAssignments =
     plan?.assignments.filter((a) => a.status === "FAILED" || a.status === "SKIPPED") ?? [];
+  const completedAssignments =
+    plan?.assignments.filter((a) => a.status === "COMPLETED") ?? [];
 
   return (
     <section className="panel space-y-4 p-5 sm:p-6">
@@ -602,32 +815,52 @@ export function ReviewPlanPanel({
           </p>
           {readyProfileCount != null && (
             <p className="mt-1 text-xs text-[var(--muted)]">
-              Account sẵn sàng: {readyProfileCount}
-              {readyProfileCount < packageTargetContents
-                ? ` (thiếu ${packageTargetContents} — sẽ tái sử dụng mail, lịch cách nhau ≥6h)`
-                : ` / ${packageTargetContents}`}
+              Mail READY (hệ thống): {readyProfileCount}
+              {eligibleSnap != null && (
+                <>
+                  {" "}
+                  · Khả dụng cho địa điểm này:{" "}
+                  <strong>{eligibleSnap.eligibleCount}</strong>
+                  {eligibleSnap.unassignedSlots > 0 && (
+                    <> · Slot chưa gán mail: {eligibleSnap.unassignedSlots}</>
+                  )}
+                </>
+              )}
               {contentGenerated ? " · Nội dung đã sinh" : " · Chưa sinh nội dung"}
               {mediaCount > 0 ? ` · Thư viện: ${mediaCount} ảnh` : ""}
               {availableProxyCount != null
                 ? ` · Proxy khả dụng: ${availableProxyCount}`
                 : ""}
+              <span className="block mt-0.5">
+                1 mail = 1 bình luận / địa điểm — không tái sử dụng mail.
+              </span>
             </p>
           )}
         </div>
       )}
 
-      {infraWarnings.filter((w) => w.severity === "warn").length > 0 && (
-        <div className="rounded-[var(--radius-sm)] border border-[var(--warn-soft)] bg-[var(--warn-soft)]/30 p-3">
-          <p className="text-xs font-semibold uppercase tracking-wide text-[var(--warn-ink)]">
-            Lưu ý trước khi đăng
-          </p>
-          <ul className="mt-2 space-y-1 text-sm text-[var(--warn-ink)]">
-            {infraWarnings
-              .filter((w) => w.severity === "warn")
-              .map((w) => (
-                <li key={w.id}>• {w.message}</li>
-              ))}
-          </ul>
+      {eligibleSnap && eligibleSnap.unassignedSlots > 0 && plan && (
+        <div className="rounded-[var(--radius-sm)] border border-[var(--warn-soft)] bg-[var(--warn-soft)]/40 p-3 text-sm text-[var(--warn-ink)]">
+          <strong>{eligibleSnap.unassignedSlots}</strong> bài chưa gán mail ·{" "}
+          <strong>{eligibleSnap.eligibleCount}</strong> mail có thể gán cho địa điểm này.
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="btn btn-sm btn-soft"
+              disabled={busy || eligibleSnap.eligibleCount === 0}
+              onClick={() => void fillEmptyProfiles()}
+            >
+              Tự gán slot trống
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm btn-secondary"
+              disabled={busy}
+              onClick={() => void loadEligible()}
+            >
+              Làm mới mail khả dụng
+            </button>
+          </div>
         </div>
       )}
 
@@ -696,6 +929,16 @@ export function ReviewPlanPanel({
           >
           {plan?.status === "RUNNING" ? "Đăng 1 bài theo lịch" : "Kích hoạt lịch đăng"}
         </button>
+          {completedAssignments.length > 0 && (
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={busy || verifyAllBusy || verifyingId !== null}
+              onClick={() => void verifyAllCompleted()}
+            >
+              {verifyAllBusy ? "Đang quét…" : `Quét ${completedAssignments.length} bài đã đăng`}
+            </button>
+          )}
         </div>
       </div>
       <p className="text-xs text-[var(--muted)]">
@@ -850,6 +1093,7 @@ export function ReviewPlanPanel({
                   <th className="py-2 pr-2">Status</th>
                   <th className="py-2 pr-2">Nội dung</th>
                   <th className="py-2 pr-2">Link</th>
+                  <th className="py-2 pr-2">Quét</th>
                   <th className="py-2">Đăng</th>
                 </tr>
               </thead>
@@ -863,6 +1107,7 @@ export function ReviewPlanPanel({
                   const showSchedBadge = !!schedLabel;
                   const canPostOne =
                     (a.status === "PENDING" || a.status === "FAILED") &&
+                    !!a.apmProfileId &&
                     (plan.status === "READY" || plan.status === "RUNNING");
                   const isPosting = postingId === a.id;
                   return (
@@ -922,7 +1167,35 @@ export function ReviewPlanPanel({
                       )}
                     </td>
                     <td className="py-2 pr-2">{a.stars}★</td>
-                    <td className="py-2 pr-2 text-xs">{a.profileEmail || "—"}</td>
+                    <td className="py-2 pr-2 text-xs">
+                      {a.status === "PENDING" || a.status === "FAILED" ? (
+                        <select
+                          className="input !px-2 !py-1 max-w-[180px] text-xs"
+                          value={a.apmProfileId ?? ""}
+                          disabled={busy || savingProfileId === a.id || postingId !== null}
+                          onChange={(e) => {
+                            void saveAssignmentProfile(a.id, e.target.value);
+                          }}
+                        >
+                          <option value="">— Chưa gán mail —</option>
+                          {(eligibleSnap?.profiles ?? []).map((p) => (
+                            <option key={p.id} value={p.id}>
+                              {p.email}
+                            </option>
+                          ))}
+                          {a.apmProfileId &&
+                            a.profileEmail &&
+                            !eligibleSnap?.profiles.some((p) => p.id === a.apmProfileId) && (
+                              <option value={a.apmProfileId}>{a.profileEmail}</option>
+                            )}
+                        </select>
+                      ) : (
+                        a.profileEmail || "—"
+                      )}
+                      {savingProfileId === a.id && (
+                        <span className="block text-[var(--muted)]">Đang lưu…</span>
+                      )}
+                    </td>
                     <td className="py-2 pr-2">
                       <MediaThumbs
                         assets={assignmentMedia(a)}
@@ -933,6 +1206,18 @@ export function ReviewPlanPanel({
                       <span className="badge badge-neutral" title={a.status}>
                         {assignmentStatusLabel(a.status)}
                       </span>
+                      {a.status === "COMPLETED" && a.reviewVisibility && (
+                        <span
+                          className={`mt-1 block ${reviewVisibilityBadgeClass(a.reviewVisibility)}`}
+                          title={
+                            a.lastVerifiedAt
+                              ? `Quét lúc ${formatDateTimeVi(a.lastVerifiedAt)}`
+                              : undefined
+                          }
+                        >
+                          {reviewVisibilityLabel(a.reviewVisibility)}
+                        </span>
+                      )}
                       {a.error && (
                         <p
                           className="mt-1 line-clamp-2 text-xs leading-snug text-[var(--danger)]"
@@ -960,6 +1245,20 @@ export function ReviewPlanPanel({
                         </a>
                       ) : (
                         "—"
+                      )}
+                    </td>
+                    <td className="py-2 pr-2">
+                      {a.status === "COMPLETED" ? (
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-soft"
+                          disabled={busy || verifyAllBusy || verifyingId !== null}
+                          onClick={() => void verifyAssignment(a.id)}
+                        >
+                          {verifyingId === a.id ? "Đang…" : "Quét"}
+                        </button>
+                      ) : (
+                        <span className="text-[var(--muted)]">—</span>
                       )}
                     </td>
                     <td className="py-2">

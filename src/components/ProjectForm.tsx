@@ -47,13 +47,14 @@ type ProjectFormProps = {
     targetMarket: string;
     writingNotes: string | null;
     googleMapsUrl: string;
+    placeKey?: string | null;
+    resolvedUrl?: string | null;
     packageId: string;
     desiredRating: string | number | null;
     currentRating: string | number | null;
     reviewCount: string | number | null;
     ratingScannedAt?: string | null;
     reviewsToPost?: string | number | null;
-    proxyCooldownMinutes?: string | number | null;
     startAt: string;
     endAt: string;
     products: ProductRow[];
@@ -100,6 +101,10 @@ export function ProjectForm({
     initial?.writingNotes || seed?.writingNotes || "",
   );
   const [googleMapsUrl, setGoogleMapsUrl] = useState(initial?.googleMapsUrl || "");
+  const [placeKey, setPlaceKey] = useState<string | null>(initial?.placeKey ?? null);
+  const [resolvedMapsUrl, setResolvedMapsUrl] = useState<string | null>(
+    initial?.resolvedUrl ?? null,
+  );
   const [packageId, setPackageId] = useState(
     initial?.packageId || initialPackages?.[0]?.id || "",
   );
@@ -114,9 +119,6 @@ export function ProjectForm({
   );
   const [ratingScannedAt, setRatingScannedAt] = useState(
     initial?.ratingScannedAt ?? "",
-  );
-  const [proxyCooldownMinutes, setProxyCooldownMinutes] = useState(
-    initial?.proxyCooldownMinutes != null ? String(initial.proxyCooldownMinutes) : "60",
   );
   const [checkingMaps, setCheckingMaps] = useState(false);
   const [mapsStatus, setMapsStatus] = useState<"idle" | "ok" | "warn" | "error">("idle");
@@ -224,6 +226,8 @@ export function ProjectForm({
 
       const resolved = (data.resolvedUrl as string) || url;
       if (resolved !== url) setGoogleMapsUrl(resolved);
+      if (data.placeKey) setPlaceKey(data.placeKey as string);
+      setResolvedMapsUrl(resolved);
       if (data.placeName && !brandName.trim()) setBrandName(data.placeName);
 
       setMapsStatus("ok");
@@ -260,6 +264,8 @@ export function ProjectForm({
           if (scrape.placeName) {
             setBrandName((prev) => (prev.trim() ? prev : scrape.placeName));
           }
+          if (scrape.placeKey) setPlaceKey(scrape.placeKey as string);
+          if (scrape.resolvedUrl) setResolvedMapsUrl(scrape.resolvedUrl as string);
 
           const scanned = new Date().toISOString();
           const hasRating = scrape.currentRating != null;
@@ -310,10 +316,6 @@ export function ProjectForm({
     if (!packageId) return "Vui lòng chọn gói";
     if (!googleMapsUrl.trim()) return "Vui lòng nhập link Google Maps";
     if (mapsStatus === "error") return "Link Google Maps chưa hợp lệ — kiểm tra lại";
-    const cooldown = Number(proxyCooldownMinutes);
-    if (!Number.isFinite(cooldown) || cooldown < 0) {
-      return "Cooldown proxy phải là số ≥ 0";
-    }
     if (!startAt) return "Vui lòng chọn ngày bắt đầu";
     if (startAt < minCampaignDate) {
       return `Ngày bắt đầu phải từ ${minCampaignDate} trở đi`;
@@ -404,12 +406,13 @@ export function ProjectForm({
       targetMarket,
       writingNotes,
       googleMapsUrl,
+      placeKey,
+      resolvedUrl: resolvedMapsUrl,
       packageId,
       desiredRating: desiredRating || null,
       currentRating: currentRating || null,
       reviewCount: reviewCount || null,
       ratingScannedAt: ratingScannedAt || null,
-      proxyCooldownMinutes: proxyCooldownMinutes || 60,
       startAt,
       endAt,
       products,
@@ -680,22 +683,6 @@ export function ProjectForm({
               Δ {starPlanPreview.delta})
             </p>
           )}
-        </Field>
-        <Field label="Cooldown proxy (phút) *" htmlFor="proxyCooldownMinutes">
-          <input
-            id="proxyCooldownMinutes"
-            type="number"
-            min={0}
-            max={10080}
-            className="input"
-            value={proxyCooldownMinutes}
-            onChange={(e) => setProxyCooldownMinutes(e.target.value)}
-            placeholder="60"
-            required={showPackage}
-          />
-          <p className="mt-1 text-xs text-[var(--muted)]">
-            Sau mỗi bài, proxy bị khóa cooldown trước khi dự án khác dùng lại
-          </p>
         </Field>
         <Field label="Bắt đầu *" htmlFor="startAt">
           <input

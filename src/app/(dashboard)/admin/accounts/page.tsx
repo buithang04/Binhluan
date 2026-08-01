@@ -98,6 +98,15 @@ function accountIsReady(account: Account): boolean {
   return account.status === "READY" || account.profile?.status === "READY";
 }
 
+/** Cần đăng nhập lại / verify — kế hoạch bình luận bỏ qua các mail này. */
+function accountNeedsVerify(account: Account): boolean {
+  if (account.loginIssue) return true;
+  if (account.status !== "READY") return true;
+  if (!account.profile) return true;
+  if (account.profile.status !== "READY") return true;
+  return false;
+}
+
 /** Nhãn trạng thái — ưu tiên profile QUEUED/RUNNING khi đang mở Chrome. */
 function accountStatusLabel(account: Account): string {
   if (accountIsReady(account)) return "Sẵn sàng";
@@ -525,32 +534,11 @@ export default function AdminAccountsPage() {
     }
   }
 
-  async function resetBrowserProfile(account: Account) {
-    if (!token) return;
-    const ok = window.confirm(
-      `Làm mới Chrome cho ${account.email}?\nXóa phiên cũ — sau đó bấm Mở để đăng nhập lại.`,
-    );
-    if (!ok) return;
-    setBusyId(account.id);
-    setError("");
-    setMessage("");
-    try {
-      const res = await apmFetch<{ message?: string }>(
-        `/accounts/${account.id}/reset-browser`,
-        token,
-        { method: "POST", body: "{}" },
-      );
-      setMessage(res.message || `Đã làm mới hồ sơ — bấm Mở để đăng nhập ${account.email}`);
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusyId(null);
-    }
-  }
-
   async function openOrFocusBrowser(account: Account) {
-    if (!token) return;
+    if (!token) {
+      setError("Chưa có token APM — đăng xuất rồi đăng nhập lại bằng admin@apm.local");
+      return;
+    }
     setBusyId(account.id);
     setError("");
     setMessage("");
@@ -597,8 +585,8 @@ export default function AdminAccountsPage() {
 
       setMessage(
         alive
-          ? `Chrome #${idx} — đang tự điền đăng nhập / xác minh…`
-          : `Đang mở Chrome #${idx} đăng nhập…`,
+          ? `Chrome #${idx} — đang tự điền đăng nhập / xác minh… (worker 1 Chrome/lần, có thể chờ vài phút)`
+          : `Đang xếp hàng mở Chrome #${idx}… (worker 1 Chrome/lần, có thể chờ vài phút)`,
       );
 
       const targetId = account.id;
@@ -659,39 +647,6 @@ export default function AdminAccountsPage() {
     clearSelection();
     await load();
     setMessage(`Đã xóa ${done}/${total} tài khoản.`);
-    if (fails.length) setError(fails.slice(0, 3).join("; "));
-    setBulkBusy(false);
-  }
-
-  async function bulkReset() {
-    if (!token || !selectedAccounts.length) return;
-    const withProfile = selectedAccounts.filter((a) => a.profile);
-    if (!withProfile.length) {
-      setError("Các tài khoản đã chọn chưa có hồ sơ Chrome để làm mới.");
-      return;
-    }
-    const ok = window.confirm(
-      `Làm mới Chrome cho ${withProfile.length} tài khoản?\nXóa phiên cũ — sau đó bấm Mở để đăng nhập lại.`,
-    );
-    if (!ok) return;
-    setBulkBusy(true);
-    setError("");
-    setMessage("");
-    let done = 0;
-    const fails: string[] = [];
-    for (const acc of withProfile) {
-      try {
-        await apmFetch(`/accounts/${acc.id}/reset-browser`, token, {
-          method: "POST",
-          body: "{}",
-        });
-        done += 1;
-      } catch (err) {
-        fails.push(`${acc.email}: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-    await load();
-    setMessage(`Đã làm mới ${done}/${withProfile.length} hồ sơ.`);
     if (fails.length) setError(fails.slice(0, 3).join("; "));
     setBulkBusy(false);
   }
@@ -1255,14 +1210,6 @@ export default function AdminAccountsPage() {
                   type="button"
                   className="btn btn-secondary !py-1.5 text-xs"
                   disabled={bulkBusy}
-                  onClick={() => void bulkReset()}
-                >
-                  Làm mới
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-secondary !py-1.5 text-xs"
-                  disabled={bulkBusy}
                   title="Dừng công việc đang chạy của tài khoản đã chọn"
                   onClick={() => void stopRunningJobs("selected")}
                 >
@@ -1321,6 +1268,7 @@ export default function AdminAccountsPage() {
                   const busy = busyId === r.id || bulkBusy;
                   const checked = selectedIds.has(r.id);
                   const statusLabel = accountStatusLabel(r);
+                  const needsVerify = accountNeedsVerify(r);
                   return (
                     <tr key={r.id} className={checked ? "row-selected" : undefined}>
                       <td>
@@ -1378,21 +1326,29 @@ export default function AdminAccountsPage() {
                           </button>
                           <button
                             type="button"
+                            className={
+                              needsVerify
+                                ? "action-btn action-btn-primary shadow-[0_0_0_2px_var(--warn)]"
+                                : "action-btn action-btn-edit opacity-60"
+                            }
+                            disabled={busy}
+                            title={
+                              needsVerify
+                                ? "Cần đăng nhập lại / xác minh — mở Chrome"
+                                : "Tài khoản đã sẵn sàng"
+                            }
+                            onClick={() => void openOrFocusBrowser(r)}
+                          >
+                            {busyId === r.id ? "…" : "Verify"}
+                          </button>
+                          <button
+                            type="button"
                             className="action-btn action-btn-edit"
                             disabled={busy}
                             title="Sửa email / mật khẩu"
                             onClick={() => openEdit(r)}
                           >
                             Sửa
-                          </button>
-                          <button
-                            type="button"
-                            className="action-btn action-btn-edit"
-                            disabled={busy || !r.profile}
-                            title="Xóa phiên Chrome cũ (khi bị lặp đăng nhập)"
-                            onClick={() => void resetBrowserProfile(r)}
-                          >
-                            Làm mới
                           </button>
                           <button
                             type="button"

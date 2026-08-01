@@ -98,6 +98,34 @@ export class ProxiesService {
     };
   }
 
+  private static MAPS_COOLDOWN_KEY = "maps_proxy_cooldown_minutes";
+
+  async getMapsCooldownMinutes() {
+    const row = await this.prisma.systemSetting.findUnique({
+      where: { key: ProxiesService.MAPS_COOLDOWN_KEY },
+    });
+    const n = row ? Number(row.value) : 60;
+    const cooldownMinutes =
+      Number.isFinite(n) && n >= 0 ? Math.min(10080, Math.floor(n)) : 60;
+    return { cooldownMinutes };
+  }
+
+  async setMapsCooldownMinutes(minutes: number) {
+    const cooldownMinutes = Math.max(
+      0,
+      Math.min(10080, Math.floor(Number(minutes) || 0)),
+    );
+    await this.prisma.systemSetting.upsert({
+      where: { key: ProxiesService.MAPS_COOLDOWN_KEY },
+      create: {
+        key: ProxiesService.MAPS_COOLDOWN_KEY,
+        value: String(cooldownMinutes),
+      },
+      update: { value: String(cooldownMinutes) },
+    });
+    return { cooldownMinutes };
+  }
+
   async list() {
     const rows = await this.prisma.proxy.findMany({
       orderBy: { createdAt: "desc" },
@@ -238,7 +266,11 @@ export class ProxiesService {
     proxyId: string,
     opts: { jobRunId?: string; cooldownMinutes?: number } = {},
   ) {
-    const cooldownMinutes = Math.max(0, opts.cooldownMinutes ?? 60);
+    const fromSetting =
+      opts.cooldownMinutes == null
+        ? (await this.getMapsCooldownMinutes()).cooldownMinutes
+        : opts.cooldownMinutes;
+    const cooldownMinutes = Math.max(0, fromSetting);
     const now = new Date();
     const cooldownUntil =
       cooldownMinutes > 0

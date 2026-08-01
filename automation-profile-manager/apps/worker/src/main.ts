@@ -343,6 +343,129 @@ async function waitForDevToolsPort(port: number, timeoutMs = 45_000) {
   throw new Error(`Chrome DevTools :${port} không sẵn sàng sau ${timeoutMs}ms`);
 }
 
+const PROFILE_CHROME_WAIT_MS = Math.max(
+  30_000,
+  Number(process.env.PROFILE_CHROME_WAIT_MS || 120_000),
+);
+
+/** Job MAPS trước còn dọn Chrome (restore sau đăng) — job kế phải chờ, không fail ngay. */
+async function waitForPriorMapsChromeCleanup(
+  profileId: string,
+  label: string,
+  timeoutMs = PROFILE_CHROME_WAIT_MS,
+): Promise<void> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const live = browserPool.get(profileId);
+    if (live?.mapsReviewInProgress && live.browser.connected) {
+      console.log(
+        `[worker] ${label} chờ job trước dọn Chrome (mapsReviewInProgress)…`,
+      );
+      await new Promise((r) => setTimeout(r, 1500));
+      continue;
+    }
+    const userDataDir = live?.browserProfilePath
+      ? path.resolve(STORAGE_DIR, live.browserProfilePath)
+      : null;
+    if (userDataDir && live?.browser.connected) {
+      const port = await readDevToolsPort(userDataDir);
+      if (port && !(await isDevToolsReachable(port))) {
+        await new Promise((r) => setTimeout(r, 800));
+        continue;
+      }
+    }
+    return;
+  }
+  console.warn(
+    `[worker] ${label} hết thời gian chờ Chrome job trước (${Math.round(timeoutMs / 1000)}s) — thử tiếp`,
+  );
+}
+
+/** Reconnect DevTools có retry — tránh fail ngay khi Chrome vừa đóng/mở lại sau MAPS. */
+async function reconnectDevToolsForMaps(
+  userDataDir: string,
+  claim: ClaimPayload,
+  maxWaitMs = 60_000,
+): Promise<{ browser: Browser; pid?: number; usingJobProxy: boolean } | null> {
+  const started = Date.now();
+  while (Date.now() - started < maxWaitMs) {
+    const port = await readDevToolsPort(userDataDir);
+    if (port) {
+      try {
+        const remain = maxWaitMs - (Date.now() - started);
+        await waitForDevToolsPort(port, Math.min(12_000, Math.max(2000, remain)));
+        const existingProxy = await readChromeProxyFromProfileDir(userDataDir);
+        const usingJobProxy = Boolean(
+          claim.proxy &&
+            existingProxy &&
+            existingProxy.host === claim.proxy.host &&
+            existingProxy.port === claim.proxy.port,
+        );
+        const browser = await puppeteer.connect({
+          browserURL: `http://127.0.0.1:${port}`,
+          defaultViewport: null,
+        });
+        if (usingJobProxy) {
+          await bindProxyAuthToBrowser(browser, claim.proxy!);
+        }
+        const pid = await resolveChromePidByProfileDir(userDataDir).catch(
+          () => undefined,
+        );
+        return { browser, pid, usingJobProxy };
+      } catch (e) {
+        console.warn(
+          `[worker] MAPS #${claim.profile.browserIndex} DevTools retry: ${e instanceof Error ? e.message : e}`,
+        );
+      }
+    }
+    await new Promise((r) => setTimeout(r, 600));
+  }
+  return null;
+}
+
+/**
+ * Chrome còn process/lock nhưng DevTools chết (thường sau restore lỗi) — dọn để launch sạch.
+ * Chỉ khi profile không còn job MAPS/LOGIN đang giữ pool.
+ */
+async function recoverStuckChromeForMaps(
+  claim: ClaimPayload,
+  profilePath: string,
+): Promise<boolean> {
+  const idx = claim.profile.browserIndex;
+  const live = browserPool.get(claim.profile.id);
+  if (live?.mapsReviewInProgress || live?.loginInProgress) {
+    return false;
+  }
+  if (live?.browser.connected) {
+    const port = await readDevToolsPort(profilePath);
+    if (port && (await isDevToolsReachable(port))) return false;
+  }
+  const pid = await resolveChromePidByProfileDir(profilePath).catch(
+    () => undefined,
+  );
+  if (!pid && !profileDirInUse(profilePath)) return false;
+
+  console.warn(
+    `[worker] MAPS #${idx} Chrome kẹt (pid=${pid ?? "?"}) DevTools chết — dọn profile để mở lại`,
+  );
+  setMapsChromeGuard(false);
+  if (live) live.mapsReviewInProgress = false;
+  await browserPool
+    .release(claim.profile.id, true, { forceClose: true })
+    .catch(() => undefined);
+  const prev = process.env.ALLOW_CHROME_KILL;
+  process.env.ALLOW_CHROME_KILL = "1";
+  try {
+    await killChromeUsingProfileDir(profilePath);
+  } finally {
+    if (prev === undefined) delete process.env.ALLOW_CHROME_KILL;
+    else process.env.ALLOW_CHROME_KILL = prev;
+  }
+  await clearStaleProfileLocks(profilePath);
+  await new Promise((r) => setTimeout(r, 900));
+  return true;
+}
+
 /**
  * Trước launch: đánh dấu profile thoát sạch để Chrome không hiện "Restore pages?".
  * (Worker restart / kill process để lại exit_type=Crashed.)
@@ -2444,34 +2567,40 @@ async function runMapsReviewJob(
       `[worker] MAPS_REVIEW #${claim.profile.browserIndex} bước1 tab=pool proxyMatch=${usingJobProxy}`,
     );
   } else if (existingPid || profileDirInUse(profilePath)) {
-    const port = await readDevToolsPort(profilePath);
-    if (!port || !(await isDevToolsReachable(port))) {
-      throw new Error(
-        `MAPS_REVIEW #${claim.profile.browserIndex}: Chrome đang mở (pid=${existingPid ?? "?"}) nhưng không reconnect được DevTools — đóng tay Chrome rồi thử lại (không spawn đè)`,
+    await waitForPriorMapsChromeCleanup(
+      claim.profile.id,
+      `MAPS_REVIEW #${claim.profile.browserIndex}`,
+    );
+    const reconnected = await reconnectDevToolsForMaps(profilePath, claim);
+    if (reconnected) {
+      browser = reconnected.browser;
+      usingJobProxy = reconnected.usingJobProxy;
+      page = await setupPage(browser, claim, { useProxy: usingJobProxy });
+      chromePid =
+        reconnected.pid ??
+        (await resolveChromePidByProfileDir(profilePath).catch(() => undefined));
+      reused = true;
+      mode = "devtools";
+      console.log(
+        `[worker] MAPS_REVIEW #${claim.profile.browserIndex} bước1 tab=devtools-retry proxyMatch=${usingJobProxy}`,
       );
-    }
-    browser = await puppeteer.connect({
-      browserURL: `http://127.0.0.1:${port}`,
-      defaultViewport: null,
-    });
-    const existingProxy = await readChromeProxyFromProfileDir(profilePath);
-    usingJobProxy = Boolean(
-      existingProxy &&
-        existingProxy.host === claim.proxy.host &&
-        existingProxy.port === claim.proxy.port,
-    );
-    if (usingJobProxy) {
+    } else {
+      await recoverStuckChromeForMaps(claim, profilePath);
+      console.log(
+        `[worker] MAPS_REVIEW #${claim.profile.browserIndex} bước1 Chrome cũ không nối được — launch/reconnect qua connectOrLaunchBrowser`,
+      );
+      const ensured = await connectOrLaunchBrowser(claim, {
+        useProxy: true,
+        neverKill: true,
+      });
+      browser = ensured.browser;
+      chromePid = ensured.pid;
+      mode = ensured.mode;
       await bindProxyAuthToBrowser(browser, claim.proxy);
+      page = await setupPage(browser, claim, { useProxy: true });
+      usingJobProxy = true;
+      reused = ensured.reused;
     }
-    page = await setupPage(browser, claim, { useProxy: usingJobProxy });
-    chromePid =
-      existingPid ??
-      (await resolveChromePidByProfileDir(profilePath).catch(() => undefined));
-    reused = true;
-    mode = "devtools";
-    console.log(
-      `[worker] MAPS_REVIEW #${claim.profile.browserIndex} bước1 tab=devtools :${port} proxyMatch=${usingJobProxy}`,
-    );
   } else {
     console.log(
       `[worker] MAPS_REVIEW #${claim.profile.browserIndex} bước1 Chrome đóng — mở mới với proxy`,
@@ -2679,11 +2808,6 @@ async function runMapsReviewJob(
         "Đã bấm Đăng nhưng không bắt được xác nhận (màn cảm ơn / form đóng) — kiểm tra trên Chrome",
       );
     }
-    if (out.alreadyReviewed) {
-      console.log(
-        `[worker] MAPS_REVIEW #${claim.profile.browserIndex} đã có review trước đó — đánh dấu hoàn thành`,
-      );
-    }
 
     // Thoát proxy + mở lại Chrome hồ sơ (myaccount, IP máy)
     let restoredProfileNoProxy = false;
@@ -2698,6 +2822,8 @@ async function runMapsReviewJob(
       console.warn(
         `[worker] MAPS #${claim.profile.browserIndex} restore hồ sơ sau đăng lỗi (review vẫn OK): ${e instanceof Error ? e.message : e}`,
       );
+      // Dọn Chrome kẹt để job kế không fail DevTools — bài đã đăng vẫn COMPLETED
+      await recoverStuckChromeForMaps(claim, profilePath).catch(() => false);
     }
 
     return {
@@ -2705,7 +2831,7 @@ async function runMapsReviewJob(
       keepAlive: true,
       result: {
         ok: out.ok,
-        alreadyReviewed: out.alreadyReviewed ?? false,
+        alreadyReviewed: false,
         reviewLink: out.reviewLink,
         pointsText: out.pointsText,
         placeUrl: out.placeUrl,
@@ -2812,6 +2938,12 @@ async function restoreProfileBrowserAfterMaps(
     mapsReviewInProgress: false,
     proxyAuth: null,
   });
+
+  if (!browser.connected) {
+    throw new Error(
+      `MAPS #${idx} restore xong nhưng CDP chưa nối — cần dọn Chrome`,
+    );
+  }
 
   const human = new HumanCursor(page);
   await ensureOnGoogleAccountProfile(page, human, {
@@ -2932,7 +3064,11 @@ async function processJob(job: ProfileTaskJob) {
     };
 
     // Chỉ alive khi pool CDP còn nối — không tin lock file (user tắt tay vẫn còn lock)
-    const stillAlive = Boolean(browserPool.get(job.profileId)?.browser.connected);
+    const liveAfter = browserPool.get(job.profileId);
+    if (job.taskCode === "MAPS_REVIEW" && liveAfter) {
+      liveAfter.mapsReviewInProgress = false;
+    }
+    const stillAlive = Boolean(liveAfter?.browser.connected);
     await api("/internal/jobs/complete", {
       profileId: job.profileId,
       leaseToken: job.leaseToken,

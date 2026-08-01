@@ -180,26 +180,23 @@ async function dismissSpuriousReviewMenus(page: Page) {
   await sleep(300);
 }
 
-async function clickReviewButton(page: Page, human: HumanCursor) {
-  // CHỈ nút viết/chỉnh sửa — KHÔNG dùng jsaction*="review" (dễ trúng Báo/Chia sẻ)
+function isNewReviewLabel(aria: string, text: string): boolean {
+  const t = `${aria} ${text}`;
+  if (/Báo bài|Report review|Chia sẻ bài|Share review|Sao chép/i.test(t)) return false;
+  if (/Chỉnh sửa bài đánh giá|Edit your review|Edit review/i.test(t)) return false;
+  return /Viết bài đánh giá|Write a review/i.test(t);
+}
+
+/** Bấm「Viết bài đánh giá / Write a review」— không bấm Chỉnh sửa; false = không thấy nút (thử writereview URL). */
+async function clickReviewButton(page: Page, human: HumanCursor): Promise<boolean> {
   const selectors = [
     'button.S9kvJb[aria-label="Viết bài đánh giá"]',
     'button[aria-label="Viết bài đánh giá"]',
     'button[aria-label="Write a review"]',
     'button[aria-label*="Viết bài đánh giá" i]',
     'button[aria-label*="Write a review" i]',
-    'button[aria-label*="Chỉnh sửa bài đánh giá" i]',
-    'button[aria-label*="Edit your review" i]',
-    'button.S9kvJb[aria-label*="đánh giá" i]',
+    'button.S9kvJb[aria-label*="Viết bài" i]',
   ];
-
-  const isWriteBtn = (aria: string, text: string) => {
-    const t = `${aria} ${text}`;
-    if (/Báo bài|Report review|Chia sẻ bài|Share review|Sao chép/i.test(t)) return false;
-    return /Viết bài đánh giá|Write a review|Chỉnh sửa bài đánh giá|Edit your review/i.test(
-      t,
-    );
-  };
 
   const tryClick = async (): Promise<boolean> => {
     for (const sel of selectors) {
@@ -217,7 +214,7 @@ async function clickReviewButton(page: Page, human: HumanCursor) {
               };
             })
             .catch(() => null);
-          if (!meta?.visible || !isWriteBtn(meta.aria, meta.text)) continue;
+          if (!meta?.visible || !isNewReviewLabel(meta.aria, meta.text)) continue;
 
           await page.evaluate((node) => {
             (node as HTMLElement).scrollIntoView({ block: "center", inline: "nearest" });
@@ -241,7 +238,7 @@ async function clickReviewButton(page: Page, human: HumanCursor) {
           }
           if (!clicked) continue;
           console.log(
-            `[maps-review] đã bấm viết đánh giá (${sel} · ${meta.aria.slice(0, 40)})`,
+            `[maps-review] đã bấm VIẾT bài đánh giá mới (${sel} · ${meta.aria.slice(0, 40)})`,
           );
           await sleep(500);
           await dismissSpuriousReviewMenus(page);
@@ -251,19 +248,19 @@ async function clickReviewButton(page: Page, human: HumanCursor) {
         /* next */
       }
     }
-    // Text trong panel — vẫn lọc Báo/Chia sẻ
     const hit = await page.evaluate(() => {
       const nodes = Array.from(
         document.querySelectorAll("button, div[role='button']"),
       ) as HTMLElement[];
       const btn = nodes.find((n) => {
-        const t = (n.getAttribute("aria-label") || "") + " " + (n.textContent || "");
+        const aria = n.getAttribute("aria-label") || "";
+        const text = (n.textContent || "").trim();
+        const t = `${aria} ${text}`;
         if (/Báo bài|Report review|Chia sẻ bài|Share review|Sao chép/i.test(t)) {
           return false;
         }
-        return /Viết bài đánh giá|Write a review|Chỉnh sửa bài đánh giá|Edit your review/i.test(
-          t,
-        );
+        if (/Chỉnh sửa|Edit your review|Edit review/i.test(t)) return false;
+        return /Viết bài đánh giá|Write a review/i.test(t);
       });
       if (!btn) return false;
       btn.scrollIntoView({ block: "center", inline: "nearest" });
@@ -271,7 +268,7 @@ async function clickReviewButton(page: Page, human: HumanCursor) {
       return true;
     });
     if (hit) {
-      console.log("[maps-review] đã bấm viết đánh giá (text fallback)");
+      console.log("[maps-review] đã bấm VIẾT bài đánh giá mới (text fallback)");
       await sleep(500);
       await dismissSpuriousReviewMenus(page);
       return true;
@@ -293,26 +290,25 @@ async function clickReviewButton(page: Page, human: HumanCursor) {
     if (await tryClick()) return true;
   }
 
-  throw new Error(
-    "Không tìm thấy nút Viết/Chỉnh sửa đánh giá — mở tab «Bài đánh giá» hoặc kiểm tra place URL",
-  );
-}
-
-/** Place đã có review của account (nút Chỉnh sửa) — tránh đăng trùng. */
-async function detectExistingReview(page: Page): Promise<boolean> {
-  return page.evaluate(() => {
-    const nodes = Array.from(
-      document.querySelectorAll("button, [role='button'], a"),
-    ) as HTMLElement[];
-    return nodes.some((n) =>
-      /Chỉnh sửa bài đánh giá|Edit your review/i.test(
-        (n.getAttribute("aria-label") || "") + " " + (n.textContent || ""),
-      ),
-    );
-  });
+  return false;
 }
 
 /** Xác minh review đã lên sau submit (khi không bắt được màn cảm ơn). */
+/** Mail đã có review tại place — Google hiện nút Chỉnh sửa (1 mail / 1 địa điểm). */
+async function detectAccountAlreadyReviewedAtPlace(page: Page): Promise<boolean> {
+  return page
+    .evaluate(() => {
+      const nodes = Array.from(
+        document.querySelectorAll("button, [role='button'], a"),
+      ) as HTMLElement[];
+      return nodes.some((n) => {
+        const t = `${n.getAttribute("aria-label") || ""} ${(n.textContent || "").trim()}`;
+        return /Chỉnh sửa bài đánh giá|Edit your review/i.test(t);
+      });
+    })
+    .catch(() => false);
+}
+
 async function verifyReviewPosted(page: Page, reviewText: string): Promise<boolean> {
   const snippet = reviewText.trim().slice(0, 48);
   for (const ctx of [page.mainFrame(), ...page.frames()]) {
@@ -500,9 +496,8 @@ async function waitReviewFrame(page: Page, timeoutMs = 35_000): Promise<Frame> {
                   " " +
                   ((n as HTMLElement).textContent || "");
                 if (/Báo bài|Chia sẻ bài|Report|Share review/i.test(t)) return false;
-                return /Viết bài đánh giá|Write a review|Chỉnh sửa bài đánh giá|Edit your review/i.test(
-                  t,
-                );
+                if (/Chỉnh sửa|Edit your review|Edit review/i.test(t)) return false;
+                return /Viết bài đánh giá|Write a review/i.test(t);
               }) as HTMLElement | undefined;
               btn?.click();
               return !!btn;
@@ -3400,6 +3395,36 @@ export async function assertGoogleSessionForMaps(page: Page, email?: string | nu
     );
   }
 }
+async function tryOpenWritereviewUrl(
+  page: Page,
+  chij: string,
+  rating: number,
+  human: HumanCursor,
+  accountEmail?: string | null,
+  waitMs = 35_000,
+): Promise<Frame | null> {
+  const writeUrl = `https://search.google.com/local/writereview?placeid=${encodeURIComponent(chij)}`;
+  console.log(`[maps-review] mở writereview (viết bài mới) ChIJ=${chij}`);
+  await page.goto(writeUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
+  await sleep(rand(1500, 2500));
+  await dismissMapsOverlays(page);
+  await logAfterWriteClick(page, "writereview");
+  if (await detectReviewWidgetSignIn(page)) {
+    const ok = await tryPassReviewWidgetSignIn(page, accountEmail);
+    if (!ok) {
+      throw new Error(
+        "Form writereview bắt đăng nhập lại — kiểm tra session Chrome profile.",
+      );
+    }
+  }
+  await tryStarsInOpenDialog(page, rating, human);
+  try {
+    return await waitReviewFrame(page, waitMs);
+  } catch {
+    return null;
+  }
+}
+
 async function openWriteReviewForm(
   page: Page,
   placeUrl: string,
@@ -3415,11 +3440,20 @@ async function openWriteReviewForm(
   }
 
   await dismissMapsOverlays(page);
-  console.log(`[maps-review] chưa thấy form — bấm Viết bài đánh giá`);
   const chijBefore = await extractChijPlaceId(page);
   if (chijBefore) {
     console.log(`[maps-review] place_id ChIJ=${chijBefore}`);
+    const viaUrl = await tryOpenWritereviewUrl(
+      page,
+      chijBefore,
+      rating,
+      human,
+      accountEmail,
+    );
+    if (viaUrl) return viaUrl;
   }
+
+  console.log(`[maps-review] chưa thấy form — bấm nút Viết bài đánh giá (mới)`);
   const browser = page.browser();
   void browser;
   const frameWait = page
@@ -3482,7 +3516,7 @@ async function openWriteReviewForm(
   // Thử lại nút chỉ khi form đã mất hẳn
   console.log(`[maps-review] form chưa mở — thử lại nút Viết đánh giá`);
   await openReviewsTab(page).catch(() => undefined);
-  await clickReviewButton(page, human).catch(() => undefined);
+  await clickReviewButton(page, human);
   await sleep(2500);
   await logAfterWriteClick(page, "2");
   await tryStarsInOpenDialog(page, rating, human);
@@ -3495,21 +3529,10 @@ async function openWriteReviewForm(
   const diagBeforeNav = await diagnoseMissingReviewForm(page);
   console.warn(`[maps-review] trước writereview diagnose=${diagBeforeNav}`);
 
-  const chij =
-    (await extractChijPlaceId(page)) || chijBefore || null;
+  const chij = (await extractChijPlaceId(page)) || chijBefore || null;
   if (chij) {
-    const writeUrl = `https://search.google.com/local/writereview?placeid=${encodeURIComponent(chij)}`;
-    console.log(`[maps-review] fallback goto writereview ChIJ=${chij}`);
-    await page.goto(writeUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
-    await sleep(rand(1500, 2500));
-    await dismissMapsOverlays(page);
-    await logAfterWriteClick(page, "writereview-chij");
-    await tryStarsInOpenDialog(page, rating, human);
-    try {
-      return await waitReviewFrame(page, 20_000);
-    } catch {
-      /* last resort */
-    }
+    const viaUrl = await tryOpenWritereviewUrl(page, chij, rating, human, accountEmail, 20_000);
+    if (viaUrl) return viaUrl;
   } else {
     const ftid = extractMapsFtid(placeUrl);
     console.warn(
@@ -3529,7 +3552,7 @@ async function openWriteReviewForm(
       { timeout: 25_000 },
     )
     .catch(() => null);
-  await clickReviewButton(page, human).catch(() => undefined);
+  await clickReviewButton(page, human);
   await sleep(3000);
   const attached2 = await frameWait2;
   if (attached2) {
@@ -3605,7 +3628,6 @@ export async function postMapsReview(
   reviewLink: string | null;
   pointsText: string | null;
   placeUrl: string;
-  alreadyReviewed?: boolean;
 }> {
   await attachProxyAuthToPage(page, opts?.proxy);
   const signal = opts?.signal;
@@ -3652,43 +3674,49 @@ export async function postMapsReview(
   console.log(`[maps-review] warmUp xong`);
   assertNotAborted(signal);
 
-  if (
-    await withStepTimeout("detectExistingReview", 15_000, () =>
-      detectExistingReview(page),
-    )
-  ) {
-    console.log("[maps-review] place đã có review của account — bỏ qua đăng trùng");
-    const existingLink = await resolveReviewLinkFromPlace(
-      page,
-      payload.placeUrl,
-      payload.reviewText,
+  if (await detectAccountAlreadyReviewedAtPlace(page)) {
+    const err = new Error(
+      "ALREADY_REVIEWED_AT_PLACE: Mail đã có bình luận tại địa điểm này (Google hiển thị Chỉnh sửa). Chọn mail khác.",
     );
-    return {
-      ok: true,
-      reviewLink: isGoodReviewLink(existingLink) ? existingLink : null,
-      pointsText: null,
-      placeUrl: payload.placeUrl,
-      alreadyReviewed: true,
-    };
+    (err as { code?: string }).code = "ALREADY_REVIEWED_AT_PLACE";
+    throw err;
   }
 
   await keepFocus({ os: "window" });
   assertNotAborted(signal);
-  console.log(`[maps-review] thử rate trên place panel (${payload.rating}★)`);
-  // Ưu tiên bấm sao trên panel place (thường mở form + đã chọn sao)
-  const ratedOnPlace = await withStepTimeout("tryRateOnPlacePanel", 25_000, () =>
-    tryRateOnPlacePanel(page, payload.rating, human),
-  );
-  console.log(`[maps-review] ratedOnPlace=${ratedOnPlace}`);
-  await sleep(rand(600, 1100));
 
-  // Mở form viết đánh giá (nút → dialog sao → writereview URL)
   let frame: Frame | null = null;
-  try {
-    frame = await waitReviewFrame(page, ratedOnPlace ? 8_000 : 2_500);
-  } catch {
-    frame = null;
+  let ratedOnPlace = false;
+
+  const chijEarly = await extractChijPlaceId(page);
+  if (chijEarly) {
+    console.log(
+      `[maps-review] thử writereview URL trước (viết bài mới) ChIJ=${chijEarly}`,
+    );
+    frame = await tryOpenWritereviewUrl(
+      page,
+      chijEarly,
+      payload.rating,
+      human,
+      opts?.accountEmail,
+    );
   }
+
+  if (!frame) {
+    console.log(`[maps-review] thử rate trên place panel (${payload.rating}★)`);
+    ratedOnPlace = await withStepTimeout("tryRateOnPlacePanel", 25_000, () =>
+      tryRateOnPlacePanel(page, payload.rating, human),
+    );
+    console.log(`[maps-review] ratedOnPlace=${ratedOnPlace}`);
+    await sleep(rand(600, 1100));
+
+    try {
+      frame = await waitReviewFrame(page, ratedOnPlace ? 8_000 : 2_500);
+    } catch {
+      frame = null;
+    }
+  }
+
   if (!frame) {
     frame = await openWriteReviewForm(
       page,

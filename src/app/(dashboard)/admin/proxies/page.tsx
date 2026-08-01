@@ -27,6 +27,8 @@ export default function AdminProxiesPage() {
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
   const [tableKey, setTableKey] = useState(0);
+  const [cooldownMinutes, setCooldownMinutes] = useState("60");
+  const [cooldownSaving, setCooldownSaving] = useState(false);
 
   const loadSync = useCallback(async () => {
     if (!token) return;
@@ -38,9 +40,54 @@ export default function AdminProxiesPage() {
     }
   }, [token]);
 
+  const loadCooldown = useCallback(async () => {
+    if (!token) return;
+    try {
+      const res = await apmFetch<{ cooldownMinutes: number }>(
+        "/proxies/settings/maps-cooldown",
+        token,
+      );
+      setCooldownMinutes(String(res.cooldownMinutes ?? 60));
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  }, [token]);
+
   useEffect(() => {
     void loadSync();
-  }, [loadSync]);
+    void loadCooldown();
+  }, [loadSync, loadCooldown]);
+
+  const saveCooldown = async () => {
+    if (!token) {
+      setErr("Chưa đăng nhập APM");
+      return;
+    }
+    const n = Number(cooldownMinutes);
+    if (!Number.isFinite(n) || n < 0 || n > 10080) {
+      setErr("Cooldown phải từ 0 đến 10080 phút");
+      return;
+    }
+    setCooldownSaving(true);
+    setErr("");
+    setMsg("");
+    try {
+      const res = await apmFetch<{ cooldownMinutes: number }>(
+        "/proxies/settings/maps-cooldown",
+        token,
+        {
+          method: "PUT",
+          body: JSON.stringify({ cooldownMinutes: Math.floor(n) }),
+        },
+      );
+      setCooldownMinutes(String(res.cooldownMinutes));
+      setMsg(`Đã lưu cooldown proxy: ${res.cooldownMinutes} phút sau mỗi bình luận`);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCooldownSaving(false);
+    }
+  };
 
   const runSync = async () => {
     if (!token) {
@@ -78,6 +125,39 @@ export default function AdminProxiesPage() {
 
   return (
     <div className="space-y-6">
+      <section className="panel space-y-4 p-4">
+        <div>
+          <h2 className="text-base font-semibold text-[var(--fg)]">
+            Cooldown proxy (bình luận Maps)
+          </h2>
+          <p className="mt-1 text-sm text-[var(--muted)]">
+            Sau mỗi bình luận thành công, proxy được khóa cooldown trước khi dùng cho bài
+            tiếp theo. Cấu hình chung cho toàn hệ thống — không còn theo từng dự án.
+          </p>
+        </div>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+          <label className="block min-w-0 flex-1 text-sm">
+            <span className="text-[var(--muted)]">Thời gian cooldown (phút)</span>
+            <input
+              type="number"
+              min={0}
+              max={10080}
+              value={cooldownMinutes}
+              onChange={(e) => setCooldownMinutes(e.target.value)}
+              className="mt-1 w-full max-w-xs rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg)] px-3 py-2 font-mono text-sm"
+            />
+          </label>
+          <button
+            type="button"
+            disabled={cooldownSaving}
+            onClick={() => void saveCooldown()}
+            className="btn btn-primary shrink-0"
+          >
+            {cooldownSaving ? "Đang lưu…" : "Lưu cooldown"}
+          </button>
+        </div>
+      </section>
+
       <section className="panel space-y-4 p-4">
         <div>
           <h2 className="text-base font-semibold text-[var(--fg)]">

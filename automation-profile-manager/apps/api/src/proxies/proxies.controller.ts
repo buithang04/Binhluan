@@ -32,6 +32,19 @@ export class ProxiesController {
     return this.sync.getStatus();
   }
 
+  /** Cooldown proxy sau mỗi bài Maps — cấu hình chung (Admin → Proxy). */
+  @Get("settings/maps-cooldown")
+  @Roles("ADMIN")
+  getMapsCooldown() {
+    return this.proxies.getMapsCooldownMinutes();
+  }
+
+  @Put("settings/maps-cooldown")
+  @Roles("ADMIN")
+  setMapsCooldown(@Body() body: { cooldownMinutes?: number }) {
+    return this.proxies.setMapsCooldownMinutes(body?.cooldownMinutes ?? 60);
+  }
+
   @Post("import/webshare")
   @Roles("ADMIN")
   importWebshare(

@@ -15,9 +15,12 @@ export type MediaItem = {
 export function ProjectMediaPanel({
   projectId,
   initialMedia,
+  onMediaChange,
 }: {
   projectId: string;
   initialMedia: MediaItem[];
+  /** Gọi khi thư viện ảnh thay đổi (upload/xóa) — đồng bộ panel kế hoạch. */
+  onMediaChange?: (media: MediaItem[]) => void;
 }) {
   const [media, setMedia] = useState<MediaItem[]>(initialMedia);
   const [uploading, setUploading] = useState(false);
@@ -35,6 +38,10 @@ export function ProjectMediaPanel({
   useEffect(() => {
     setMedia(initialMedia);
   }, [initialMedia]);
+
+  useEffect(() => {
+    onMediaChange?.(media);
+  }, [media, onMediaChange]);
 
   useEffect(() => {
     return () => {

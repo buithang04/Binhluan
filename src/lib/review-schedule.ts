@@ -41,15 +41,43 @@ function startOfVnDay(value: Date): number {
   return Date.UTC(y, m - 1, d) - 7 * 60 * 60 * 1000;
 }
 
-/** Phân bổ `count` bài đăng đều trong khoảng startAt–endAt (mỗi bài 6h–23h VN). */
+/**
+ * Đẩy mọi mốc lịch trước `notBefore` lên từ thời điểm hiện tại.
+ * Giữ thứ tự tăng dần; các mốc sát nhau cách tối thiểu `minStepMs`.
+ */
+export function clampScheduleNotBefore(
+  times: Date[],
+  notBefore: Date,
+  minStepMs = 3 * 60_000,
+): Date[] {
+  if (!times.length) return times;
+  const out = times
+    .map((t) => new Date(t.getTime()))
+    .sort((a, b) => a.getTime() - b.getTime());
+  let cursor = notBefore.getTime() + minStepMs;
+  for (let i = 0; i < out.length; i++) {
+    if (out[i]!.getTime() < cursor) {
+      out[i] = new Date(cursor);
+    }
+    cursor = out[i]!.getTime() + minStepMs;
+  }
+  return out;
+}
+
+/** Phân bổ `count` bài đăng đều trong khoảng startAt–endAt (mỗi bài 6h–23h VN).
+ *  `notBefore`: nếu có — ngày bắt đầu phân bổ không sớm hơn hôm nay (lập kế hoạch giữa chiến dịch). */
 export function planReviewScheduleDates(
   startAt: Date,
   endAt: Date,
   count: number,
+  notBefore?: Date,
 ): Date[] {
   if (count <= 0) return [];
 
-  const startMs = startOfVnDay(startAt);
+  let startMs = startOfVnDay(startAt);
+  if (notBefore) {
+    startMs = Math.max(startMs, startOfVnDay(notBefore));
+  }
   let endMs = startOfVnDay(endAt);
   if (endMs < startMs) endMs = startMs;
 

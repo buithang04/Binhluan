@@ -11,7 +11,10 @@ import {
   pickRandomMediaAssets,
   summarizeImageCounts,
 } from "@/lib/review-media";
-import { planReviewScheduleDates } from "@/lib/review-schedule";
+import {
+  clampScheduleNotBefore,
+  planReviewScheduleDates,
+} from "@/lib/review-schedule";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -61,10 +64,15 @@ export async function GET(req: Request, ctx: Ctx) {
   });
 
   const spinByStar = parseReviewSpinByStar(project.reviewSpinByStar);
-  const scheduleDates = planReviewScheduleDates(
-    project.startAt,
-    project.endAt,
-    Math.min(limit, planned.slots.length),
+  const now = new Date();
+  const scheduleDates = clampScheduleNotBefore(
+    planReviewScheduleDates(
+      project.startAt,
+      project.endAt,
+      Math.min(limit, planned.slots.length),
+      now,
+    ),
+    now,
   );
 
   const samples = planned.slots.slice(0, limit).map((slot, i) => {

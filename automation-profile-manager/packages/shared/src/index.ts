@@ -66,8 +66,6 @@ export const mapsReviewPayloadSchema = z.object({
   imagePaths: z.array(z.string().min(1).max(1000)).max(10).optional().nullable(),
   /** Liên kết ngược assignment (Next CRM). */
   assignmentId: z.string().uuid().optional().nullable(),
-  /** Cooldown proxy sau job (phút) — từ cấu hình dự án. */
-  proxyCooldownMinutes: z.number().int().min(0).max(10080).optional().nullable(),
 });
 export type MapsReviewPayload = z.infer<typeof mapsReviewPayloadSchema>;
 

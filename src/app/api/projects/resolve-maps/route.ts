@@ -43,6 +43,7 @@ export async function POST(req: Request) {
       valid: true,
       message: result.validMessage,
       resolvedUrl: result.resolvedUrl,
+      placeKey: result.placeKey ?? result.info?.placeKey ?? null,
       placeName: result.info?.placeName ?? null,
       currentRating: result.info?.currentRating ?? null,
       reviewCount: result.info?.reviewCount ?? null,

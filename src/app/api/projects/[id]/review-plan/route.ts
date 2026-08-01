@@ -2,21 +2,26 @@ import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import {
-  planReviewStars,
-} from "@/lib/review-planner";
+import { planReviewStars } from "@/lib/review-planner";
 import {
   parseReviewSpinByStar,
   resolveReviewTextForStar,
   availableReviewProfileWhere,
   prioritizeProfilesWith2Fa,
-  pickProfilesForReviewPlan,
+  pickUniqueProfilesForPlan,
 } from "@/lib/review-content";
 import { pickRandomMediaAssets, enrichPlanAssignments } from "@/lib/review-media";
 import {
   adjustScheduleForProfileReuse,
+  clampScheduleNotBefore,
   planReviewScheduleDates,
 } from "@/lib/review-schedule";
+import {
+  getBlockedProfileIdsForPlace,
+  getProfileIdsReservedForPlace,
+  fetchLedgerVisibilityByProfile,
+} from "@/lib/profile-place-review";
+import { resolveProjectPlaceKey } from "@/lib/place-key";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -42,13 +47,14 @@ export async function GET(req: Request, ctx: Ctx) {
 
   const project = await prisma.project.findFirst({
     where: isAdmin ? { id } : { id, userId: session.user.id },
-    select: { id: true },
+    select: { id: true, googleMapsUrl: true, placeKey: true },
   });
   if (!project) {
     return NextResponse.json({ error: "Không tìm thấy dự án" }, { status: 404 });
   }
 
-  // Poll nhẹ: chỉ status cần refresh UI — không load/enrich media
+  const placeKey = resolveProjectPlaceKey(project.googleMapsUrl, project.placeKey);
+
   if (light) {
     const plan = await prisma.reviewPlan.findFirst({
       where: { projectId: id },
@@ -64,6 +70,8 @@ export async function GET(req: Request, ctx: Ctx) {
             reviewLink: true,
             error: true,
             scheduledAt: true,
+            apmProfileId: true,
+            profileEmail: true,
           },
         },
       },
@@ -93,10 +101,29 @@ export async function GET(req: Request, ctx: Ctx) {
     return NextResponse.json({ plan: null, mediaCount: media.length });
   }
 
+  const completedProfileIds = plan.assignments
+    .filter((a) => a.status === "COMPLETED" && a.apmProfileId)
+    .map((a) => a.apmProfileId as string);
+  const ledgerByProfile = await fetchLedgerVisibilityByProfile(
+    placeKey,
+    completedProfileIds,
+  );
+
+  const assignmentsWithVisibility = enrichPlanAssignments(plan.assignments, media).map(
+    (a) => {
+      const ledger = a.apmProfileId ? ledgerByProfile.get(a.apmProfileId) : undefined;
+      return {
+        ...a,
+        reviewVisibility: ledger?.visibility ?? null,
+        lastVerifiedAt: ledger?.lastVerifiedAt?.toISOString() ?? null,
+      };
+    },
+  );
+
   return NextResponse.json({
     plan: {
       ...plan,
-      assignments: enrichPlanAssignments(plan.assignments, media),
+      assignments: assignmentsWithVisibility,
     },
     mediaCount: media.length,
   });
@@ -139,6 +166,14 @@ export async function POST(req: Request, ctx: Ctx) {
     );
   }
 
+  const placeKey = resolveProjectPlaceKey(project.googleMapsUrl, project.placeKey);
+  if (!project.placeKey) {
+    await prisma.project.update({
+      where: { id },
+      data: { placeKey, placeResolvedAt: new Date() },
+    });
+  }
+
   const spinByStar = parseReviewSpinByStar(project.reviewSpinByStar);
 
   const existingPlan = await prisma.reviewPlan.findFirst({
@@ -149,12 +184,16 @@ export async function POST(req: Request, ctx: Ctx) {
     orderBy: { createdAt: "desc" },
     include: {
       assignments: {
-        where: { status: "COMPLETED" },
+        where: { status: { in: ["PENDING", "FAILED", "COMPLETED"] } },
         orderBy: { sortOrder: "asc" },
       },
     },
   });
-  const completedKeep = existingPlan?.assignments ?? [];
+  const completedKeep = existingPlan?.assignments.filter((a) => a.status === "COMPLETED") ?? [];
+  const preservePending = existingPlan?.assignments.filter((a) =>
+    ["PENDING", "FAILED"].includes(a.status),
+  ) ?? [];
+  const preserveBySort = new Map(preservePending.map((a) => [a.sortOrder, a]));
   const remainingSlots = Math.max(0, reviewsToPost - completedKeep.length);
   if (remainingSlots === 0) {
     return NextResponse.json(
@@ -166,36 +205,65 @@ export async function POST(req: Request, ctx: Ctx) {
   }
 
   const now = new Date();
+  const blockedAtPlace = await getBlockedProfileIdsForPlace(placeKey);
+  for (const c of completedKeep) {
+    if (c.apmProfileId) blockedAtPlace.add(c.apmProfileId);
+  }
+
+  /** Mail đã gán ở dự án/kế hoạch khác CÙNG placeKey — không pick trùng. Khác Maps → vẫn được. */
+  const reservedSamePlace = await getProfileIdsReservedForPlace(placeKey, {
+    excludeProjectId: id,
+  });
+  const excludeForPick = new Set<string>([...blockedAtPlace, ...reservedSamePlace]);
+
   const pool = prioritizeProfilesWith2Fa(
-    await prisma.profile.findMany({
-      where: availableReviewProfileWhere(now),
-      include: { account: { select: { email: true, totpSecretEnc: true } } },
-    }),
+    (
+      await prisma.profile.findMany({
+        where: availableReviewProfileWhere(now),
+        include: { account: { select: { email: true, totpSecretEnc: true } } },
+      })
+    ).filter((p) => !blockedAtPlace.has(p.id)),
   );
 
-  if (pool.length === 0) {
+  const assignedProfiles = pickUniqueProfilesForPlan(
+    pool,
+    remainingSlots,
+    excludeForPick,
+  );
+
+  if (project.endAt < now) {
     return NextResponse.json(
-      { error: "Cần ít nhất 1 mail READY (không đang lock) để lập kế hoạch" },
+      { error: "Chiến dịch đã hết hạn (ngày kết thúc đã qua) — gia hạn endAt trước khi lập kế hoạch" },
       { status: 400 },
     );
   }
 
-  const assignedProfiles = pickProfilesForReviewPlan(
-    pool,
-    remainingSlots,
-    completedKeep.length,
-  );
-  const uniqueProfileCount = new Set(assignedProfiles.map((p) => p.id)).size;
-  const reusingProfiles = uniqueProfileCount < remainingSlots;
+  const profileIdsForSchedule: string[] = [];
+  for (let i = 0; i < reviewsToPost; i++) {
+    if (i < completedKeep.length) {
+      profileIdsForSchedule.push(completedKeep[i]!.apmProfileId ?? `done-${i}`);
+    } else {
+      const slotIdx = i - completedKeep.length;
+      const preserved = preserveBySort.get(i);
+      let pid = assignedProfiles[slotIdx]?.id ?? null;
+      if (preserved?.apmProfileId) {
+        const stillOk =
+          !blockedAtPlace.has(preserved.apmProfileId) &&
+          !excludeForPick.has(preserved.apmProfileId);
+        if (stillOk) pid = preserved.apmProfileId;
+      }
+      profileIdsForSchedule.push(pid ?? `empty-${i}`);
+    }
+  }
 
-  const minProfileGapMs = Math.max(
-    (project.proxyCooldownMinutes ?? 60) * 60_000,
-    6 * 60 * 60_000,
-  );
-  const scheduleDates = adjustScheduleForProfileReuse(
-    planReviewScheduleDates(project.startAt, project.endAt, reviewsToPost),
-    pickProfilesForReviewPlan(pool, reviewsToPost, 0).map((p) => p.id),
-    minProfileGapMs,
+  const minProfileGapMs = 6 * 60 * 60_000;
+  const scheduleDates = clampScheduleNotBefore(
+    adjustScheduleForProfileReuse(
+      planReviewScheduleDates(project.startAt, project.endAt, reviewsToPost, now),
+      profileIdsForSchedule,
+      minProfileGapMs,
+    ),
+    now,
   );
 
   const planned = planReviewStars({
@@ -206,7 +274,6 @@ export async function POST(req: Request, ctx: Ctx) {
     reviewsToPost,
   });
 
-  // Chỉ lấy slot còn lại (bỏ qua số đã COMPLETED theo thứ tự sort)
   const newSlots = planned.slots.slice(completedKeep.length);
 
   const neededStars = new Set(newSlots.map((s) => String(s.stars)));
@@ -223,7 +290,7 @@ export async function POST(req: Request, ctx: Ctx) {
 
   if (project.endAt < project.startAt) {
     return NextResponse.json(
-      { error: "Ngày kết thúc phải sau ngày bắt đầu (Gói & thời gian)" },
+      { error: "Ngày kết thúc phải nằm trong khoảng thời gian dự án" },
       { status: 400 },
     );
   }
@@ -237,7 +304,22 @@ export async function POST(req: Request, ctx: Ctx) {
       project.brandName,
     );
     const pickedMedia = media.length ? pickRandomMediaAssets(media) : [];
-    const profile = assignedProfiles[i]!;
+    let profile = assignedProfiles[i];
+    const preserved = preserveBySort.get(globalIndex);
+    if (preserved?.apmProfileId) {
+      const stillOk =
+        !blockedAtPlace.has(preserved.apmProfileId) &&
+        !excludeForPick.has(preserved.apmProfileId) &&
+        pool.some((p) => p.id === preserved.apmProfileId);
+      if (stillOk) {
+        profile =
+          pool.find((p) => p.id === preserved.apmProfileId) ??
+          ({
+            id: preserved.apmProfileId,
+            account: { email: preserved.profileEmail ?? "" },
+          } as (typeof pool)[number]);
+      }
+    }
     return {
       sortOrder: globalIndex,
       stars: slot.stars,
@@ -245,14 +327,18 @@ export async function POST(req: Request, ctx: Ctx) {
       mediaAssetId: pickedMedia[0]?.id ?? null,
       mediaAssetIds: pickedMedia.map((m) => m.id),
       scheduledAt:
+        preserved?.scheduledAt ??
         scheduleDates[globalIndex] ??
         scheduleDates[scheduleDates.length - 1] ??
         project.startAt,
-      apmProfileId: profile.id,
-      profileEmail: profile.account.email,
+      apmProfileId: profile?.id ?? null,
+      profileEmail: profile?.account.email ?? null,
       status: "PENDING" as const,
     };
   });
+
+  const assignedCount = newAssignmentsData.filter((a) => a.apmProfileId).length;
+  const unassignedSlots = remainingSlots - assignedCount;
 
   if (project.reviewsToPost !== reviewsToPost) {
     await prisma.project.update({
@@ -260,6 +346,18 @@ export async function POST(req: Request, ctx: Ctx) {
       data: { reviewsToPost },
     });
   }
+
+  const snapshotExtras = {
+    profileCount: assignedCount,
+    profilesAssigned: assignedCount,
+    unassignedSlots,
+    eligibleAtPlanTime: pool.length,
+    placeKey,
+    profileReuse: false,
+    ratingScannedAt: project.ratingScannedAt,
+    completedKept: completedKeep.length,
+    remainingPlanned: newAssignmentsData.length,
+  };
 
   const plan = await prisma.$transaction(async (tx) => {
     await tx.reviewPlan.updateMany({
@@ -271,7 +369,6 @@ export async function POST(req: Request, ctx: Ctx) {
       data: { status: "FAILED" },
     });
 
-    // Cập nhật kế hoạch hiện có: giữ COMPLETED, thay các bài chưa xong
     if (existingPlan) {
       await tx.reviewAssignment.deleteMany({
         where: {
@@ -291,15 +388,7 @@ export async function POST(req: Request, ctx: Ctx) {
         where: { id: existingPlan.id },
         data: {
           status: existingPlan.status === "RUNNING" ? "RUNNING" : "READY",
-          snapshot: {
-            ...planned,
-            profileCount: uniqueProfileCount,
-            profilesAssigned: assignedProfiles.length,
-            profileReuse: reusingProfiles,
-            ratingScannedAt: project.ratingScannedAt,
-            completedKept: completedKeep.length,
-            remainingPlanned: newAssignmentsData.length,
-          },
+          snapshot: { ...planned, ...snapshotExtras },
         },
         include: {
           assignments: {
@@ -312,19 +401,11 @@ export async function POST(req: Request, ctx: Ctx) {
       });
     }
 
-    const created = await tx.reviewPlan.create({
+    return tx.reviewPlan.create({
       data: {
         projectId: id,
         status: "READY",
-        snapshot: {
-          ...planned,
-          profileCount: uniqueProfileCount,
-          profilesAssigned: assignedProfiles.length,
-          profileReuse: reusingProfiles,
-          ratingScannedAt: project.ratingScannedAt,
-          completedKept: 0,
-          remainingPlanned: newAssignmentsData.length,
-        },
+        snapshot: { ...planned, ...snapshotExtras },
         assignments: { create: newAssignmentsData },
       },
       include: {
@@ -336,8 +417,6 @@ export async function POST(req: Request, ctx: Ctx) {
         },
       },
     });
-
-    return created;
   });
 
   const enriched = {
@@ -345,18 +424,21 @@ export async function POST(req: Request, ctx: Ctx) {
     assignments: enrichPlanAssignments(plan.assignments, media),
   };
 
+  let message: string | undefined;
+  if (completedKeep.length > 0) {
+    message = `Đã giữ ${completedKeep.length} bài hoàn thành, lập ${newAssignmentsData.length} bài còn lại — gán ${assignedCount} mail`;
+  } else {
+    message = `Đã lập kế hoạch — gán ${assignedCount}/${remainingSlots} mail (1 mail / 1 bình luận / địa điểm)`;
+  }
+  if (unassignedSlots > 0) {
+    message += `. ${unassignedSlots} bài chưa có mail — bổ sung account hoặc chọn mail thủ công.`;
+  }
+
   return NextResponse.json({
     plan: enriched,
     planned,
-    message:
-      completedKeep.length > 0
-        ? `Đã giữ ${completedKeep.length} bài hoàn thành, lập lại ${newAssignmentsData.length} bài còn lại${
-            reusingProfiles
-              ? ` (tái sử dụng ${uniqueProfileCount} mail — lịch cách nhau ≥6h)`
-              : ""
-          }`
-        : reusingProfiles
-          ? `Đã lập kế hoạch — tái sử dụng ${uniqueProfileCount}/${remainingSlots} mail (lịch cách nhau ≥6h)`
-          : undefined,
+    unassignedSlots,
+    assignedCount,
+    message,
   });
 }

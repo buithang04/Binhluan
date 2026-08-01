@@ -1,14 +1,18 @@
+import { extractPlaceKeyFromUrl } from "./place-key";
+
 export type MapsPlaceInfo = {
   placeName: string | null;
   currentRating: number | null;
   reviewCount: number | null;
   source: "dom_scrape" | "manual" | "url";
+  placeKey?: string | null;
 };
 
 export type MapsResolveResult = {
   valid: boolean;
   validMessage: string;
   resolvedUrl: string;
+  placeKey?: string | null;
   info: MapsPlaceInfo | null;
 };
 
@@ -88,14 +92,16 @@ export async function resolveGoogleMapsUrlFast(inputUrl: string): Promise<MapsRe
   }
 
   const placeName = extractPlaceNameFromUrl(finalUrl);
+  const placeKey = extractPlaceKeyFromUrl(finalUrl);
   return {
     valid: true,
     validMessage: resolvedIsMaps
       ? "Link hợp lệ"
       : "Link hợp lệ (redirect Google lệch — dùng link gốc)",
     resolvedUrl: finalUrl,
+    placeKey,
     info: placeName
-      ? { placeName, currentRating: null, reviewCount: null, source: "url" }
+      ? { placeName, currentRating: null, reviewCount: null, source: "url", placeKey }
       : null,
   };
 }
@@ -116,11 +122,13 @@ export async function resolveGoogleMapsUrl(
       valid: true,
       validMessage: "Link hợp lệ — place chưa có đánh giá (0 lượt)",
       resolvedUrl: fast.resolvedUrl,
+      placeKey: info.placeKey ?? fast.placeKey ?? extractPlaceKeyFromUrl(fast.resolvedUrl),
       info: {
         placeName: info.placeName ?? fast.info?.placeName ?? null,
         currentRating: info.currentRating,
         reviewCount: 0,
         source: "dom_scrape",
+        placeKey: info.placeKey ?? fast.placeKey ?? null,
       },
     };
   }
@@ -130,6 +138,7 @@ export async function resolveGoogleMapsUrl(
       valid: true,
       validMessage: "Link hợp lệ",
       resolvedUrl: fast.resolvedUrl,
+      placeKey: info.placeKey ?? fast.placeKey ?? extractPlaceKeyFromUrl(fast.resolvedUrl),
       info,
     };
   }
@@ -138,6 +147,7 @@ export async function resolveGoogleMapsUrl(
     valid: true,
     validMessage: "Link hợp lệ — chưa quét được sao/lượt đánh giá từ trang Maps",
     resolvedUrl: fast.resolvedUrl,
+    placeKey: fast.placeKey ?? extractPlaceKeyFromUrl(fast.resolvedUrl),
     info: info ?? fast.info,
   };
 }

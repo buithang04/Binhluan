@@ -116,6 +116,16 @@ export const projectCreateSchema = z
       .refine((v) => /google\.[^/]+\/maps|maps\.app\.goo\.gl|goo\.gl\/maps/i.test(v), {
         message: "Link Google Maps không hợp lệ",
       }),
+    placeKey: z.preprocess((v) => {
+      if (v == null) return null;
+      const t = String(v).trim();
+      return t ? t : null;
+    }, z.union([z.null(), z.string().max(120)])),
+    resolvedUrl: z.preprocess((v) => {
+      if (v == null) return null;
+      const t = String(v).trim();
+      return t ? t : null;
+    }, z.union([z.null(), z.string().max(2048)])),
     packageId: z.string().min(1, "Chọn gói"),
     desiredRating: ratingSchema,
     currentRating: currentRatingSchema,
@@ -126,16 +136,6 @@ export const projectCreateSchema = z
         if (v === null || v === undefined || v === "") return null;
         const d = new Date(v);
         return Number.isNaN(d.getTime()) ? null : d.toISOString();
-      }),
-    proxyCooldownMinutes: z
-      .union([z.string(), z.number(), z.null(), z.undefined()])
-      .transform((v) => {
-        if (v === null || v === undefined || v === "") return 60;
-        const n = typeof v === "number" ? v : Number(v);
-        return Number.isFinite(n) ? Math.floor(n) : NaN;
-      })
-      .refine((v) => v >= 0 && v <= 10080, {
-        message: "Cooldown proxy phải từ 0 đến 10080 phút",
       }),
     startAt: z.string().min(1, "Chọn ngày bắt đầu"),
     endAt: z.string().min(1, "Chọn ngày kết thúc"),

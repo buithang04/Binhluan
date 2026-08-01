@@ -174,6 +174,7 @@ model Profile {
   proxy              Proxy?         @relation(fields: [proxyId], references: [id])
   assignment         ProxyAssignment?
   jobs               JobRun[]
+  placeReviews       ProfilePlaceReview[]
 
   @@index([status, nextRun])
   @@index([leaseUntil])
@@ -310,6 +311,20 @@ enum ReviewAssignmentStatus {
   SKIPPED
 }
 
+enum ReviewVisibility {
+  UNKNOWN
+  VISIBLE
+  DELETED
+  HIDDEN
+}
+
+enum ProfilePlaceReviewSource {
+  POSTED
+  DETECTED_ABORT
+  MANUAL
+  BACKFILL
+}
+
 model Package {
   id             String    @id @default(uuid())
   code           String    @unique
@@ -389,6 +404,11 @@ model Project {
   /** Đã sinh nội dung review theo sao (1 lần / dự án). */
   reviewContentGeneratedAt DateTime?
   googleMapsUrl    String
+  /** Khóa địa điểm chuẩn (ChIJ hoặc ftid) — không dùng URL thô. */
+  placeKey         String?
+  resolvedUrl      String?
+  placeMeta        Json?
+  placeResolvedAt  DateTime?
   desiredRating    Decimal?          @db.Decimal(2, 1)
   currentRating    Decimal?          @db.Decimal(2, 1)
   reviewCount      Int?
@@ -413,6 +433,38 @@ model Project {
   @@index([userId])
   @@index([status])
   @@index([googleMapsUrl])
+  @@index([placeKey])
+}
+
+/** Sổ cái: 1 mail × 1 placeKey = tối đa 1 bình luận. */
+model ProfilePlaceReview {
+  id              String                   @id @default(uuid())
+  profileId       String
+  accountEmail    String
+  placeKey        String
+  placeName       String?
+  placeAddress    String?
+  placePhone      String?
+  placeWebsite    String?
+  googleMapsUrl   String?
+  resolvedUrl     String?
+  stars           Int?
+  reviewText      String?                  @db.Text
+  reviewLink      String?
+  assignmentId    String?                  @unique
+  projectId       String?
+  postedAt        DateTime                 @default(now())
+  lastVerifiedAt  DateTime?
+  visibility      ReviewVisibility         @default(UNKNOWN)
+  source          ProfilePlaceReviewSource @default(POSTED)
+  createdAt       DateTime                 @default(now())
+  updatedAt       DateTime                 @updatedAt
+  profile         Profile                  @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@unique([profileId, placeKey])
+  @@index([placeKey])
+  @@index([accountEmail, placeKey])
+  @@index([visibility])
 }
 
 model ReviewPlan {

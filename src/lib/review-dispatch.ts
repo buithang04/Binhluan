@@ -16,6 +16,9 @@ import {
 } from "@/lib/review-preflight";
 import { isWithinScheduleWindow, scheduleGraceMs } from "@/lib/review-schedule";
 import { registerLoginWait, clearLoginWait } from "@/lib/review-login-wait";
+import { registerProxyWait, clearProxyWait } from "@/lib/review-proxy-wait";
+import { profileHasReviewAtPlace } from "@/lib/profile-place-review";
+import { resolveProjectPlaceKey } from "@/lib/place-key";
 
 export type DispatchResult = {
   dispatched: number;
@@ -79,6 +82,7 @@ async function loadAssignmentsForDispatch(options: {
   const candidates = await prisma.reviewAssignment.findMany({
     where: {
       status: "PENDING",
+      apmProfileId: { not: null },
       scheduledAt: {
         not: null,
         lte: now,
@@ -99,6 +103,30 @@ async function loadAssignmentsForDispatch(options: {
     .slice(0, limit);
 }
 
+const PROXY_WAIT_MSG =
+  "Đang chờ proxy — sẽ tự đăng ngay khi có slot (lock/cooldown hết)";
+
+/** Số bài PENDING trong cửa sổ lịch, sẵn sàng enqueue khi có proxy. */
+export async function countDuePendingForDispatch(projectId?: string): Promise<number> {
+  const now = new Date();
+  const graceMs = scheduleGraceMs();
+  const windowStart = new Date(now.getTime() - graceMs);
+  const rows = await prisma.reviewAssignment.findMany({
+    where: {
+      status: "PENDING",
+      apmProfileId: { not: null },
+      scheduledAt: { not: null, lte: now, gte: windowStart },
+      plan: {
+        status: "RUNNING",
+        ...(projectId ? { projectId } : {}),
+      },
+    },
+    select: { id: true, scheduledAt: true },
+    take: 100,
+  });
+  return rows.filter((a) => isWithinScheduleWindow(a.scheduledAt, now, graceMs)).length;
+}
+
 async function enqueueOneAssignment(
   a: AssignmentWithPlan,
   now: Date,
@@ -112,10 +140,24 @@ async function enqueueOneAssignment(
   const projectId = project.id;
 
   if (!a.apmProfileId) {
-    const err = "Chưa gán account cho bài đăng — lập lại kế hoạch";
+    const err = "Chưa gán mail — chọn mail trước khi đăng";
     await prisma.reviewAssignment.update({
       where: { id: a.id },
-      data: { status: "SKIPPED", error: err },
+      data: { status: "PENDING", error: err.slice(0, 2000) },
+    });
+    result.errors.push(`#${a.sortOrder + 1}: ${err}`);
+    return;
+  }
+
+  const placeKey = resolveProjectPlaceKey(
+    project.googleMapsUrl,
+    (project as { placeKey?: string | null }).placeKey,
+  );
+  if (await profileHasReviewAtPlace(a.apmProfileId, placeKey)) {
+    const err = `Mail ${a.profileEmail ?? ""} đã bình luận địa điểm này — chọn mail khác`;
+    await prisma.reviewAssignment.update({
+      where: { id: a.id },
+      data: { status: "FAILED", error: err.slice(0, 2000) },
     });
     result.errors.push(`#${a.sortOrder + 1}: ${err}`);
     return;
@@ -246,7 +288,6 @@ async function enqueueOneAssignment(
             imagePath: imagePaths[0] ?? null,
             imagePaths: imagePaths.length ? imagePaths : null,
             assignmentId: a.id,
-            proxyCooldownMinutes: project.proxyCooldownMinutes ?? 60,
           },
         }),
       },
@@ -269,6 +310,9 @@ async function enqueueOneAssignment(
     const msg = formatReviewError(raw) || raw;
     const transient =
       /đang chạy job|already queued|đang bị lock|proxy|cooldown|lease/i.test(msg);
+    if (/proxy|cooldown|proxy trống/i.test(msg)) {
+      registerProxyWait({ assignmentId: a.id, projectId });
+    }
     if (!transient) {
       await prisma.reviewAssignment.update({
         where: { id: a.id },
@@ -477,11 +521,13 @@ export async function dispatchDueReviewAssignments(options?: {
 
   const proxyCount = await countAvailableProxies(now);
   if (proxyCount === 0 && !options?.assignmentId) {
+    const dueCount = await countDuePendingForDispatch(options?.projectId);
+    if (dueCount > 0) {
+      registerProxyWait({ projectId: options?.projectId });
+    }
     return {
       dispatched: 0,
-      errors: [
-        "Không còn proxy khả dụng (đang lock hoặc cooldown) — thêm proxy hoặc chờ cooldown",
-      ],
+      errors: [dueCount > 0 ? PROXY_WAIT_MSG : "Không còn proxy khả dụng — thêm proxy hoặc chờ cooldown"],
       assignmentIds: [],
     };
   }
@@ -508,9 +554,13 @@ export async function dispatchDueReviewAssignments(options?: {
   }
 
   if (proxyCount === 0) {
-    result.errors.push(
-      "Không còn proxy khả dụng (đang lock hoặc cooldown) — thêm proxy hoặc chờ cooldown",
-    );
+    const projectId =
+      options?.projectId ?? assignments[0]?.plan.project.id;
+    registerProxyWait({
+      assignmentId: options?.assignmentId,
+      projectId,
+    });
+    result.errors.push(PROXY_WAIT_MSG);
     return result;
   }
 
@@ -526,6 +576,19 @@ export async function dispatchDueReviewAssignments(options?: {
       result,
       options?.autoContinue ?? false,
     );
+  }
+
+  if (result.dispatched > 0) {
+    if (options?.assignmentId) {
+      clearProxyWait({ assignmentId: options.assignmentId });
+    }
+    const dueLeft = await countDuePendingForDispatch(options?.projectId);
+    const proxiesLeft = await countAvailableProxies();
+    if (dueLeft === 0) {
+      clearProxyWait({ projectId: options?.projectId });
+    } else if (proxiesLeft === 0) {
+      registerProxyWait({ projectId: options?.projectId });
+    }
   }
 
   return result;

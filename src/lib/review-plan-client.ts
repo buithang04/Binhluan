@@ -14,10 +14,13 @@ export type ClientAssignment = {
   sortOrder: number;
   stars: number;
   reviewText: string;
+  apmProfileId?: string | null;
   profileEmail: string | null;
   status: string;
   reviewLink: string | null;
   error: string | null;
+  reviewVisibility?: string | null;
+  lastVerifiedAt?: string | null;
   scheduledAt?: string | null;
   mediaAssetIds?: unknown;
   mediaAssets?: MediaThumb[];
@@ -52,6 +55,7 @@ type DbAssignment = {
   sortOrder: number;
   stars: number;
   reviewText: string;
+  apmProfileId?: string | null;
   profileEmail: string | null;
   status: string;
   reviewLink: string | null;
@@ -85,10 +89,13 @@ export function toClientReviewPlan(
       sortOrder: a.sortOrder,
       stars: a.stars,
       reviewText: a.reviewText,
+      apmProfileId: a.apmProfileId ?? null,
       profileEmail: a.profileEmail,
       status: a.status,
       reviewLink: a.reviewLink,
       error: a.error,
+      reviewVisibility: (a as { reviewVisibility?: string | null }).reviewVisibility ?? null,
+      lastVerifiedAt: (a as { lastVerifiedAt?: string | null }).lastVerifiedAt ?? null,
       scheduledAt:
         a.scheduledAt instanceof Date
           ? a.scheduledAt.toISOString()

@@ -5,9 +5,8 @@ import { getSession } from "@/lib/session";
 import { prisma } from "@/lib/prisma";
 import { BusinessInfoPanel } from "@/components/BusinessInfoPanel";
 import { ContentPanel } from "@/components/ContentPanel";
-import { ProjectMediaPanel } from "@/components/ProjectMediaPanel";
+import { ProjectMediaReviewSection } from "@/components/ProjectMediaReviewSection";
 import { ProjectSetupHint } from "@/components/ProjectSetupHint";
-import { ReviewPlanPanel } from "@/components/ReviewPlanPanel";
 import {
   computeProjectStarPlan,
   getStarPlanBlockers,
@@ -137,35 +136,29 @@ export default async function ProjectDetailPage({ params }: Props) {
         />
       </div>
 
-      <div id="project-media" className="scroll-mt-6">
-        <ProjectMediaPanel
-          projectId={project.id}
-          initialMedia={project.media.map((m) => ({
-            id: m.id,
-            filePath: m.filePath,
-            caption: m.caption,
-            fileName: m.fileName,
-          }))}
-        />
-      </div>
-
-      <ReviewPlanPanel
+      <ProjectMediaReviewSection
         projectId={project.id}
-        packageTargetContents={project.package.targetContents}
-        initialMediaCount={project.media.length}
-        initialContentGenerated={
-          !!(
-            project.reviewContentGeneratedAt &&
-            project.reviewContentGeneratedAt.getTime() > 0
-          )
-        }
-        initialPlan={initialPlan}
-        initialStarPreview={initialStarPlan}
-        initialBlockers={initialBlockers}
-        initialReadyProfileCount={null}
-        initialInfraWarnings={[]}
-        initialAvailableProxyCount={null}
-        initialRatingScannedAt={project.ratingScannedAt?.toISOString() ?? null}
+        initialMedia={project.media.map((m) => ({
+          id: m.id,
+          filePath: m.filePath,
+          caption: m.caption,
+          fileName: m.fileName,
+        }))}
+        reviewPlan={{
+          packageTargetContents: project.package.targetContents,
+          initialContentGenerated:
+            !!(
+              project.reviewContentGeneratedAt &&
+              project.reviewContentGeneratedAt.getTime() > 0
+            ),
+          initialPlan: initialPlan,
+          initialStarPreview: initialStarPlan,
+          initialBlockers: initialBlockers,
+          initialReadyProfileCount: null,
+          initialInfraWarnings: [],
+          initialAvailableProxyCount: null,
+          initialRatingScannedAt: project.ratingScannedAt?.toISOString() ?? null,
+        }}
       />
     </div>
   );

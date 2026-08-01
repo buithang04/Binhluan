@@ -10,6 +10,14 @@ const LOGIN_ISSUE_VI: Record<string, string> = {
 
 const ERROR_RULES: { test: RegExp; message: string }[] = [
   {
+    test: /ALREADY_REVIEWED_AT_PLACE|đã có bình luận tại địa điểm/i,
+    message: "Mail đã bình luận địa điểm này — chọn mail khác",
+  },
+  {
+    test: /Chưa gán mail/i,
+    message: "Chưa gán mail — chọn mail trước khi đăng",
+  },
+  {
     test: /Test d\?ng|Test dừng/i,
     message: "Đã tạm dừng test — bấm Đăng lại",
   },
@@ -18,8 +26,8 @@ const ERROR_RULES: { test: RegExp; message: string }[] = [
     message: "Google chưa đăng nhập — mở Chrome đăng nhập rồi Đăng lại",
   },
   {
-    test: /không còn proxy|proxy trống|proxy.*cooldown|đang lock hoặc cooldown/i,
-    message: "Hết proxy khả dụng — thêm proxy hoặc chờ cooldown",
+    test: /đang chờ proxy|không còn proxy|proxy trống|proxy.*cooldown|đang lock hoặc cooldown/i,
+    message: "Đang chờ proxy — sẽ tự đăng khi có slot",
   },
   {
     test: /không chiếm được proxy|proxy \(race\)/i,
@@ -40,6 +48,15 @@ const ERROR_RULES: { test: RegExp; message: string }[] = [
   {
     test: /MAPS_REVIEW bị chặn|exit IP trùng IP máy|proxy .* auth thất bại|thiếu user\/pass/i,
     message: "Proxy chưa sẵn sàng — kiểm tra Webshare",
+  },
+  {
+    test: /devtools|reconnect|KHÔNG tự kill|không reconnect được/i,
+    message:
+      "Chrome profile đang bận — hệ thống sẽ tự thử lại; nếu lặp lại, đóng Chrome thừa rồi Đăng lại",
+  },
+  {
+    test: /chờ job trước|chờ Chrome job|Chrome kẹt/i,
+    message: "Đang chờ Chrome profile — sẽ tự đăng khi sẵn sàng",
   },
   {
     test: /browser không còn mở|bấm mở browser/i,

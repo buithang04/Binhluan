@@ -1,4 +1,5 @@
 import { existsSync } from "fs";
+import { extractPlaceKeyFromUrl } from "./place-key";
 import type { MapsPlaceInfo } from "./google-maps";
 
 type Scraped = {
@@ -58,14 +59,6 @@ function extractPlaceNameFromUrl(url: string): string | null {
     }
   }
 
-  return null;
-}
-
-function extractPlaceKeyFromUrl(url: string): string | null {
-  const hex = url.match(/1s(0x[a-f0-9]+:0x[a-f0-9]+)/i)?.[1];
-  if (hex) return hex.toLowerCase();
-  const chij = url.match(/19s(ChIJ[^!?&]+)/i)?.[1];
-  if (chij) return chij;
   return null;
 }
 
@@ -294,6 +287,22 @@ async function openReviewsTab(page: import("puppeteer").Page) {
   await new Promise((r) => setTimeout(r, 250));
 }
 
+/** Chạy thao tác trên 1 tab Maps (dùng chung browser pool). */
+export async function withMapsPage<T>(
+  fn: (page: import("puppeteer").Page) => Promise<T>,
+): Promise<T> {
+  return withScrapeLock(async () => {
+    const browser = await getSharedBrowser();
+    const page = await browser.newPage();
+    try {
+      await setupPage(page);
+      return await fn(page);
+    } finally {
+      await page.close().catch(() => undefined);
+    }
+  });
+}
+
 export async function scrapeGoogleMapsDom(url: string): Promise<MapsPlaceInfo | null> {
   const key = cacheKey(url);
   const hit = scrapeCache.get(key);
@@ -386,6 +395,10 @@ export async function scrapeGoogleMapsDom(url: string): Promise<MapsPlaceInfo | 
         currentRating: scraped.currentRating,
         reviewCount: scraped.reviewCount,
         source: "dom_scrape",
+        placeKey:
+          extractPlaceKeyFromUrl(page.url()) ??
+          placeKey ??
+          extractPlaceKeyFromUrl(url),
       };
       scrapeCache.set(key, { at: Date.now(), info });
       return info;
