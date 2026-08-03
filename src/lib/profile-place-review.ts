@@ -35,6 +35,18 @@ export async function getProfileIdsReservedForPlace(
     excludeAssignmentId?: string;
   },
 ): Promise<Set<string>> {
+  if (!placeKey) return new Set();
+
+  const matchingProjects = await prisma.project.findMany({
+    where: {
+      placeKey,
+      ...(options?.excludeProjectId ? { id: { not: options.excludeProjectId } } : {}),
+    },
+    select: { id: true },
+  });
+  const projectIds = matchingProjects.map((p) => p.id);
+  if (!projectIds.length) return new Set();
+
   const rows = await prisma.reviewAssignment.findMany({
     where: {
       apmProfileId: { not: null },
@@ -45,28 +57,15 @@ export async function getProfileIdsReservedForPlace(
       plan: {
         status: { in: ["READY", "RUNNING"] },
         ...(options?.excludePlanId ? { id: { not: options.excludePlanId } } : {}),
-        ...(options?.excludeProjectId
-          ? { projectId: { not: options.excludeProjectId } }
-          : {}),
+        projectId: { in: projectIds },
       },
     },
-    select: {
-      apmProfileId: true,
-      plan: {
-        select: {
-          project: { select: { googleMapsUrl: true, placeKey: true } },
-        },
-      },
-    },
+    select: { apmProfileId: true },
   });
+
   const reserved = new Set<string>();
   for (const row of rows) {
-    if (!row.apmProfileId) continue;
-    const key = resolveProjectPlaceKey(
-      row.plan.project.googleMapsUrl,
-      row.plan.project.placeKey,
-    );
-    if (key === placeKey) reserved.add(row.apmProfileId);
+    if (row.apmProfileId) reserved.add(row.apmProfileId);
   }
   return reserved;
 }

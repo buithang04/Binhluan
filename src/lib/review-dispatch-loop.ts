@@ -1,5 +1,7 @@
 import "server-only";
 
+import { isReviewAutoDispatchPaused } from "@/lib/review-dispatch-control";
+
 declare global {
   // eslint-disable-next-line no-var
   var __apmReviewDispatchStarted: boolean | undefined;
@@ -20,6 +22,7 @@ export function startReviewDispatchLoop() {
 
   const tick = async () => {
     try {
+      if (await isReviewAutoDispatchPaused()) return;
       const { dispatchDueReviewAssignments } = await import("@/lib/review-dispatch");
       const result = await dispatchDueReviewAssignments();
       if (result.dispatched > 0) {
@@ -38,6 +41,7 @@ export function startReviewDispatchLoop() {
   // Tự đăng tiếp các bài đang chờ login xong (account chuyển READY) — không cần bấm lại.
   const loginTick = async () => {
     try {
+      if (await isReviewAutoDispatchPaused()) return;
       const { drainLoginWaits } = await import("@/lib/review-login-wait");
       const waits = drainLoginWaits();
       if (waits.length === 0) return;
@@ -62,6 +66,7 @@ export function startReviewDispatchLoop() {
   // Chờ proxy — poll nhanh (5s) để đăng ngay khi lock/cooldown hết.
   const proxyTick = async () => {
     try {
+      if (await isReviewAutoDispatchPaused()) return;
       const { drainProxyWaits, hasProxyWaits } = await import("@/lib/review-proxy-wait");
       if (!hasProxyWaits()) return;
       const { dispatchDueReviewAssignments } = await import("@/lib/review-dispatch");

@@ -19,6 +19,7 @@ import { registerLoginWait, clearLoginWait } from "@/lib/review-login-wait";
 import { registerProxyWait, clearProxyWait } from "@/lib/review-proxy-wait";
 import { profileHasReviewAtPlace } from "@/lib/profile-place-review";
 import { resolveProjectPlaceKey } from "@/lib/place-key";
+import { isReviewAutoDispatchPaused } from "@/lib/review-dispatch-control";
 
 export type DispatchResult = {
   dispatched: number;
@@ -509,8 +510,13 @@ export async function dispatchDueReviewAssignments(options?: {
   assignmentId?: string;
   /** Retry tự động sau login — không mở lại Chrome, chỉ đăng khi READY. */
   autoContinue?: boolean;
+  /** Đăng tay / bấm nút trên UI — bỏ qua tạm dừng auto toàn hệ thống. */
+  ignorePause?: boolean;
 }): Promise<DispatchResult> {
   const now = new Date();
+
+  const manualDispatch =
+    Boolean(options?.ignorePause || options?.assignmentId);
 
   await recoverStuckAssignments(now).catch((e) =>
     console.warn(
@@ -518,6 +524,10 @@ export async function dispatchDueReviewAssignments(options?: {
       e instanceof Error ? e.message : e,
     ),
   );
+
+  if (!manualDispatch && (await isReviewAutoDispatchPaused())) {
+    return { dispatched: 0, errors: [], assignmentIds: [] };
+  }
 
   const proxyCount = await countAvailableProxies(now);
   if (proxyCount === 0 && !options?.assignmentId) {

@@ -50,6 +50,9 @@ function trySh(cmd, args) {
   }
 }
 
+console.log("→ ensure REVIEW_CRON_SECRET");
+sh(process.execPath, [path.join(root, "scripts", "ensure-cron-secret.mjs")]);
+
 console.log("→ Docker compose up -d");
 if (!trySh("docker", ["compose", "up", "-d"])) {
   console.error("Docker chưa chạy — bật Docker Desktop rồi thử lại.");

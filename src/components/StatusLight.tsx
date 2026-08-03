@@ -120,6 +120,8 @@ export function formatStatusLabel(status: string): string {
     case "BLOCKED":
     case "BANNED":
       return "Bị chặn";
+    case "DRAFT":
+      return "Nháp";
     case "ACTIVE":
     case "ONLINE":
       return "Hoạt động";

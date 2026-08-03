@@ -165,7 +165,6 @@ export class AccountsService {
       const totpRaw = String(
         raw.totpSecret || raw["2fa"] || raw.totp || "",
       ).trim();
-      const totpSecretEnc = totpEncFromInput(totpRaw || null);
 
       if (!email) {
         errors.push({ row: i + 1, error: "Thiếu email" });
@@ -173,6 +172,9 @@ export class AccountsService {
       }
 
       try {
+        let totpSecretEnc: ReturnType<typeof totpEncFromInput>;
+        totpSecretEnc = totpEncFromInput(totpRaw || null);
+
         if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
           errors.push({ row: i + 1, email, error: "Email không hợp lệ" });
           continue;
@@ -180,7 +182,15 @@ export class AccountsService {
 
         const existing = await this.prisma.googleAccount.findUnique({ where: { email } });
         if (existing) {
-          if (input.updateExisting && password.length >= 6) {
+          if (input.updateExisting) {
+            if (password.length < 6) {
+              errors.push({
+                row: i + 1,
+                email,
+                error: "Cập nhật thất bại — mật khẩu tối thiểu 6 ký tự",
+              });
+              continue;
+            }
             await this.prisma.googleAccount.update({
               where: { id: existing.id },
               data: {

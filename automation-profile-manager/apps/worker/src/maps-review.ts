@@ -3359,32 +3359,54 @@ async function tryPassReviewWidgetSignIn(
  */
 export async function assertGoogleSessionForMaps(page: Page, email?: string | null): Promise<void> {
   console.log(`[maps-review] kiểm tra session Google…`);
-  await page
-    .goto("https://myaccount.google.com/", {
-      waitUntil: "domcontentloaded",
-      timeout: 45_000,
-    })
-    .catch(() => undefined);
-  await sleep(1500);
-  const info = await page
-    .evaluate((wantEmail) => {
-      const url = location.href;
-      const body = (document.body?.innerText || "").slice(0, 500);
-      const signedIn =
-        /myaccount\.google\.com/i.test(url) &&
-        !/ServiceLogin|signin\/|accounts\.google\.com\/v3\/signin/i.test(url);
-      const emailHit = wantEmail
-        ? body.toLowerCase().includes(String(wantEmail).toLowerCase()) ||
-          !!document.querySelector(
-            `[data-email="${wantEmail}"], [aria-label*="${wantEmail}" i]`,
-          )
-        : signedIn;
-      return { url: url.slice(0, 120), signedIn, emailHit, snip: body.slice(0, 160) };
-    }, email || null)
-    .catch(() => ({ url: "", signedIn: false, emailHit: false, snip: "" }));
+  const gotoUrls = [
+    "https://myaccount.google.com/",
+    "https://myaccount.google.com/?pli=1",
+  ];
+  let info = { url: "", signedIn: false, emailHit: false, snip: "" };
 
-  console.log(`[maps-review] session check=`, JSON.stringify(info));
+  for (const gotoUrl of gotoUrls) {
+    await page
+      .goto(gotoUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: 45_000,
+      })
+      .catch(() => undefined);
+    await sleep(1500);
+    info = await page
+      .evaluate((wantEmail) => {
+        const url = location.href;
+        const body = (document.body?.innerText || "").slice(0, 800);
+        const onSignIn =
+          /ServiceLogin|signin\/|accounts\.google\.com\/v3\/signin|challenge/i.test(url);
+        const onMyAccount = /myaccount\.google\.com/i.test(url) && !onSignIn;
+        const emailHit = wantEmail
+          ? body.toLowerCase().includes(String(wantEmail).toLowerCase()) ||
+            !!document.querySelector(
+              `[data-email="${wantEmail}"], [aria-label*="${wantEmail}" i]`,
+            )
+          : false;
+        const signedIn = onMyAccount || (emailHit && !onSignIn);
+        return { url: url.slice(0, 120), signedIn, emailHit, snip: body.slice(0, 160) };
+      }, email || null)
+      .catch(() => ({ url: "", signedIn: false, emailHit: false, snip: "" }));
+
+    console.log(`[maps-review] session check (${gotoUrl})=`, JSON.stringify(info));
+    if (info.signedIn) break;
+    // Trang marketing google.com/account/about — thử URL khác
+    if (!/google\.com\/account\/about/i.test(info.url)) break;
+  }
+
+  const tunnelOrNetFail =
+    /chrome-error:|ERR_TUNNEL|ERR_PROXY|ERR_CONNECTION|can't be reached|site can.t be reached/i.test(
+      `${info.url} ${info.snip}`,
+    );
   if (!info.signedIn) {
+    if (tunnelOrNetFail) {
+      throw new Error(
+        `Proxy/tunnel lỗi khi mở myaccount (${info.url || "chrome-error"}) — worker sẽ thử mở lại Chrome+proxy.`,
+      );
+    }
     throw new Error(
       `Google chưa đăng nhập (đang ở ${info.url || "login"}) — mở profile đăng nhập rồi chạy lại MAPS.`,
     );

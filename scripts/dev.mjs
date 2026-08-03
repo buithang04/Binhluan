@@ -98,6 +98,9 @@ async function main() {
   console.log("→ env:sync");
   sh(process.execPath, [path.join(apm, "scripts", "env-sync.js")], { cwd: apm });
 
+  console.log("→ ensure REVIEW_CRON_SECRET");
+  sh(process.execPath, [path.join(root, "scripts", "ensure-cron-secret.mjs")]);
+
   const webMode = (process.env.WEB_MODE || "dev").toLowerCase();
   const webCommand =
     webMode === "prod"

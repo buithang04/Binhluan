@@ -319,7 +319,7 @@ export default function AdminAccountsPage() {
       if (!parsed.length) {
         setImportRows([]);
         setImportFileName(file.name);
-        setError("File không có dòng hợp lệ. Cần cột email + mật khẩu.");
+        setError("File không có dòng hợp lệ. Cần 3 cột: tk, mk (2fa tuỳ chọn).");
         return;
       }
       setImportRows(parsed);
@@ -891,9 +891,8 @@ export default function AdminAccountsPage() {
               Nhập Excel / CSV
             </h2>
             <p className="mt-1 text-xs text-[var(--muted)]">
-              Cột: <code>email</code>, <code>password</code> (bắt buộc). Tuỳ chọn:{" "}
-              <code>2fa</code> / <code>totp</code>. Chấp nhận tên cột tiếng Việt: tk, mk,
-              mật khẩu…
+              Đúng 3 cột: <code>tk</code> (email), <code>mk</code> (mật khẩu),{" "}
+              <code>2fa</code> (tuỳ chọn).
             </p>
           </div>
           <input
@@ -931,9 +930,9 @@ export default function AdminAccountsPage() {
                 <thead>
                   <tr>
                     <th>#</th>
-                    <th>Email</th>
-                    <th>Mật khẩu</th>
-                    <th>2FA</th>
+                    <th>tk</th>
+                    <th>mk</th>
+                    <th>2fa</th>
                   </tr>
                 </thead>
                 <tbody>

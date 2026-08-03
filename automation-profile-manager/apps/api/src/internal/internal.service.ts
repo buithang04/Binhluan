@@ -10,12 +10,14 @@ import {
   loadAssignmentPlaceContext,
   upsertProfilePlaceReviewTx,
 } from "./profile-place-review";
+import { ProxiesService } from "../proxies/proxies.service";
 
 @Injectable()
 export class InternalService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly live: LiveEventsService,
+    private readonly proxies: ProxiesService,
   ) {}
 
   /** Cooldown sau MAPS — cấu hình tại Admin → Proxy (SystemSetting). */
@@ -58,6 +60,67 @@ export class InternalService {
             : null,
       },
     });
+  }
+
+  /** MAPS: proxy tunnel/auth fail → đánh FAILED, lock proxy khác cho cùng job ACTIVE. */
+  async reswapJobProxy(input: {
+    profileId: string;
+    leaseToken: string;
+    jobRunId: string;
+    failedProxyId?: string;
+  }) {
+    const profile = await this.prisma.profile.findUnique({
+      where: { id: input.profileId },
+    });
+    if (!profile || profile.leaseToken !== input.leaseToken) {
+      throw new BadRequestException("Invalid lease");
+    }
+
+    const job = await this.prisma.jobRun.findUnique({
+      where: { id: input.jobRunId },
+      include: { proxy: true },
+    });
+    if (!job || job.profileId !== profile.id) {
+      throw new BadRequestException("Job not found");
+    }
+    if (job.status !== "ACTIVE") {
+      throw new BadRequestException("Job not active");
+    }
+    if (job.taskCode !== "MAPS_REVIEW") {
+      throw new BadRequestException("Not a MAPS job");
+    }
+
+    const failedId = input.failedProxyId || job.proxyId;
+    if (failedId) {
+      await this.prisma.proxy.updateMany({
+        where: { id: failedId, lockedByJobId: job.id },
+        data: {
+          lockedUntil: null,
+          lockedByJobId: null,
+          health: "FAILED",
+          lastCheckedAt: new Date(),
+        },
+      });
+    } else {
+      await this.releaseJobProxy(job, { applyCooldown: false });
+    }
+
+    const proxy = await this.proxies.acquireRandomForJob(job.id, 30, null);
+    await this.prisma.jobRun.update({
+      where: { id: job.id },
+      data: { proxyId: proxy.id },
+    });
+
+    return {
+      proxy: {
+        id: proxy.id,
+        host: proxy.host,
+        port: proxy.port,
+        protocol: proxy.protocol,
+        username: proxy.usernameEnc ? decryptSecret(proxy.usernameEnc) : null,
+        password: proxy.passwordEnc ? decryptSecret(proxy.passwordEnc) : null,
+      },
+    };
   }
 
   async claim(input: { profileId: string; leaseToken: string; jobRunId: string; workerId: string }) {
@@ -246,6 +309,8 @@ export class InternalService {
           browserVersion: input.browserVersion,
           browserAlive,
           browserWorkerId: browserAlive ? input.workerId ?? null : null,
+          // Proxy chỉ thuộc JobRun — browser/profile mặc định IP máy
+          ...(job?.taskCode === "MAPS_REVIEW" ? { proxyId: null } : {}),
         },
       });
 
@@ -425,6 +490,7 @@ export class InternalService {
           currentTask: null,
           browserAlive,
           browserWorkerId: browserAlive ? input.workerId ?? null : null,
+          ...(job?.taskCode === "MAPS_REVIEW" ? { proxyId: null } : {}),
         },
       });
       await tx.googleAccount.update({

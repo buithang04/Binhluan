@@ -22,6 +22,10 @@ const ERROR_RULES: { test: RegExp; message: string }[] = [
     message: "Đã tạm dừng test — bấm Đăng lại",
   },
   {
+    test: /MAPS_REVIEW bị chặn: proxy|auth thất bại|ERR_TUNNEL|warmup không trả IP/i,
+    message: "Proxy lỗi — hệ thống đang thử proxy khác; kiểm tra Webshare nếu lặp lại",
+  },
+  {
     test: /Google chưa đăng nhập|accounts\.google\.com|signin\/identifier/i,
     message: "Google chưa đăng nhập — mở Chrome đăng nhập rồi Đăng lại",
   },

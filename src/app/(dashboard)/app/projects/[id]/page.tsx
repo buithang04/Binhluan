@@ -13,6 +13,15 @@ import {
   parseReviewSpinByStar,
 } from "@/lib/review-content";
 import { normalizeStarPlan, toClientReviewPlan } from "@/lib/review-plan-client";
+import {
+  resolveProjectDisplayStatus,
+  syncProjectStatusFromReviewPlan,
+} from "@/lib/project-status";
+import {
+  countDuplicatePlanProfiles,
+  repairDuplicatePlanAssignments,
+} from "@/lib/review-plan-profiles";
+import { StatusLight } from "@/components/StatusLight";
 
 type Props = { params: Promise<{ id: string }> };
 
@@ -49,6 +58,7 @@ export default async function ProjectDetailPage({ params }: Props) {
             status: true,
             reviewText: true,
             profileEmail: true,
+            apmProfileId: true,
             reviewLink: true,
             error: true,
             scheduledAt: true,
@@ -61,6 +71,41 @@ export default async function ProjectDetailPage({ params }: Props) {
     }),
   ]);
   if (!project) notFound();
+
+  if (reviewPlan && (await countDuplicatePlanProfiles(reviewPlan.id)) > 0) {
+    await repairDuplicatePlanAssignments(reviewPlan.id);
+    reviewPlan.assignments = await prisma.reviewAssignment.findMany({
+      where: { planId: reviewPlan.id },
+      orderBy: { sortOrder: "asc" },
+      select: {
+        id: true,
+        sortOrder: true,
+        stars: true,
+        status: true,
+        reviewText: true,
+        profileEmail: true,
+        reviewLink: true,
+        error: true,
+        scheduledAt: true,
+        mediaAssetIds: true,
+        mediaAssetId: true,
+        apmProfileId: true,
+        mediaAsset: { select: { id: true, filePath: true, fileName: true } },
+      },
+    });
+  }
+
+  if (reviewPlan?.status) {
+    const target = reviewPlan.status === "RUNNING" ? "ACTIVE" : reviewPlan.status === "DONE" ? "COMPLETED" : null;
+    if (
+      target &&
+      ((target === "ACTIVE" && project.status === "DRAFT") ||
+        (target === "COMPLETED" && ["DRAFT", "ACTIVE", "PAUSED"].includes(project.status)))
+    ) {
+      await syncProjectStatusFromReviewPlan(id, reviewPlan.status);
+    }
+  }
+  const displayStatus = resolveProjectDisplayStatus(project.status, reviewPlan?.status);
 
   const mediaThumbs = project.media.map((m) => ({
     id: m.id,
@@ -78,7 +123,7 @@ export default async function ProjectDetailPage({ params }: Props) {
         <div>
           <h1 className="page-title">{project.brandName}</h1>
           <p className="page-desc flex flex-wrap items-center gap-2">
-            <span className="badge badge-neutral">{project.status}</span>
+            <StatusLight value={displayStatus} kind="status" />
             <span>Gói {project.package.code}</span>
           </p>
         </div>

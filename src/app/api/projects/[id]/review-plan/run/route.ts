@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { dispatchDueReviewAssignments } from "@/lib/review-dispatch";
 import { resolveAssignmentMedia } from "@/lib/review-media";
 import { getScheduleState } from "@/lib/review-schedule";
+import { syncProjectStatusFromReviewPlan } from "@/lib/project-status";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -49,6 +50,7 @@ export async function POST(_req: Request, ctx: Ctx) {
       where: { id: plan.id },
       data: { status: "RUNNING" },
     });
+    await syncProjectStatusFromReviewPlan(id, "RUNNING");
   }
 
   const dispatch = justActivated
@@ -56,6 +58,7 @@ export async function POST(_req: Request, ctx: Ctx) {
     : await dispatchDueReviewAssignments({
         projectId: id,
         limit: 1,
+        ignorePause: true,
       });
 
   const refreshed = await prisma.reviewPlan.findUnique({

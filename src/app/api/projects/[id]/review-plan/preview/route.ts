@@ -16,6 +16,8 @@ import {
   campaignEndDatePassedMessage,
   isCampaignEndDatePassed,
   planReviewScheduleDates,
+  SCHEDULE_MIN_LEAD_MS,
+  SCHEDULE_MIN_SLOT_GAP_MS,
 } from "@/lib/review-schedule";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -85,6 +87,8 @@ export async function GET(req: Request, ctx: Ctx) {
       now,
     ),
     now,
+    SCHEDULE_MIN_SLOT_GAP_MS,
+    SCHEDULE_MIN_LEAD_MS,
   );
 
   const samples = planned.slots.slice(0, limit).map((slot, i) => {

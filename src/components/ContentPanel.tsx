@@ -307,37 +307,22 @@ export function ContentPanel({
         <h2 className="font-display text-lg font-semibold tracking-tight text-[var(--ink)]">
           Nội dung bình luận theo sao
         </h2>
-        <p className="mt-1 text-sm text-[var(--muted)]">
-          DeepSeek gọi <strong>1 lần</strong> sinh đủ template spin cho các mức sao cần dùng
-          (vd 3+4+5★ → 1 response JSON). Khi đăng bài, hệ thống random trong block {"{a|b|c}"}.
-          Mỗi dự án chỉ sinh 1 lần — có thể chỉnh sửa template sau khi sinh.
+        <p className="mt-1 text-xs text-[var(--muted)]">
+          Sinh template spin theo sao (DeepSeek, 1 lần/dự án). Có thể sửa sau khi sinh.
         </p>
       </div>
 
       {starPlan ? (
-        <div className="rounded-[var(--radius-sm)] border border-[var(--line)] bg-[var(--surface-muted)] p-3 text-sm text-[var(--ink-soft)]">
-          <p>
-            <strong>Phân bổ sao</strong> ({starPlan.reviewsToPost} bình luận
-            {packageLimit ? ` / gói ${packageLimit}` : ""}):{" "}
-            {neededStars
-              .map((s) => `${starPlan.countsByStar[s]}×${s}★`)
-              .join(", ") || "—"}
-          </p>
-          <p className="mt-1">
-            Rating: {starPlan.currentRating}★ → dự kiến {starPlan.projectedRating}★ (mục tiêu{" "}
-            {starPlan.desiredRating}★, Δ {starPlan.delta})
-          </p>
-        </div>
+        <p className="text-xs text-[var(--ink-soft)]">
+          {neededStars.map((s) => `${starPlan.countsByStar[s]}×${s}★`).join(", ") || "—"} →{" "}
+          {starPlan.currentRating}★ dự kiến {starPlan.projectedRating}★ (mục tiêu {starPlan.desiredRating}★)
+        </p>
       ) : initialLoading ? (
         <div className="animate-pulse rounded-[var(--radius-sm)] border border-[var(--line)] bg-[var(--surface-muted)] p-3 text-sm text-[var(--muted)]">
           Đang tải phân bổ sao…
         </div>
       ) : starPlanBlockers.length > 0 ? (
-        <ul className="space-y-1 text-sm text-[var(--warn)]">
-          {starPlanBlockers.map((b) => (
-            <li key={b}>• {b}</li>
-          ))}
-        </ul>
+        <p className="text-xs text-[var(--warn)]">{starPlanBlockers.join(" · ")}</p>
       ) : (
         <p className="text-sm text-[var(--warn)]">
           Chưa tính được phân bổ sao — cần số sao hiện tại, mục tiêu và số bình luận trên dự án.

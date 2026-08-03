@@ -11,6 +11,9 @@ import {
 } from "@/lib/profile-place-review";
 import { resolveProjectPlaceKey } from "@/lib/place-key";
 
+const eligibleCache = new Map<string, { at: number; data: EligibleProfilesSnapshot }>();
+const ELIGIBLE_CACHE_MS = 4_000;
+
 export type EligibleProfileRow = {
   id: string;
   email: string;
@@ -47,6 +50,13 @@ export async function getEligibleProfilesForProject(
   projectId: string,
   options?: { planId?: string; excludeAssignmentId?: string },
 ): Promise<EligibleProfilesSnapshot | null> {
+  const cacheKey = `${projectId}:${options?.planId ?? ""}:${options?.excludeAssignmentId ?? ""}`;
+  const cached = eligibleCache.get(cacheKey);
+  const nowMs = Date.now();
+  if (cached && nowMs - cached.at < ELIGIBLE_CACHE_MS) {
+    return cached.data;
+  }
+
   const project = await prisma.project.findUnique({
     where: { id: projectId },
     select: {
@@ -137,7 +147,7 @@ export async function getEligibleProfilesForProject(
 
   const eligibleCount = eligible.length;
 
-  return {
+  const snapshot = {
     placeKey,
     unassignedSlots,
     eligibleCount,
@@ -148,6 +158,8 @@ export async function getEligibleProfilesForProject(
     profiles: eligible,
     updatedAt: now.toISOString(),
   };
+  eligibleCache.set(cacheKey, { at: nowMs, data: snapshot });
+  return snapshot;
 }
 
 /** Kiểm tra 1 profile có thể gán cho assignment. */

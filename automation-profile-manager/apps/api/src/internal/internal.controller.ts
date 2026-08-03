@@ -21,6 +21,16 @@ export class InternalController {
     return this.internal.claim(body);
   }
 
+  @Post("jobs/reswap-proxy")
+  reswapProxy(@Body() body: {
+    profileId: string;
+    leaseToken: string;
+    jobRunId: string;
+    failedProxyId?: string;
+  }) {
+    return this.internal.reswapJobProxy(body);
+  }
+
   @Post("jobs/fail")
   fail(@Body() body: {
     profileId: string;

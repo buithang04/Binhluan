@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useSession } from "next-auth/react";
 import { useHydrated } from "@/lib/use-hydrated";
 import {
   parseMediaAssetIds,
@@ -203,6 +204,8 @@ export function ReviewPlanPanel({
   const [savingProfileId, setSavingProfileId] = useState<string | null>(null);
   const [verifyingId, setVerifyingId] = useState<string | null>(null);
   const [verifyAllBusy, setVerifyAllBusy] = useState(false);
+  const [autoDispatchPaused, setAutoDispatchPaused] = useState<boolean | null>(null);
+  const [autoDispatchBusy, setAutoDispatchBusy] = useState(false);
   const [eligibleSnap, setEligibleSnap] = useState<EligibleSnap | null>(null);
   const [error, setError] = useState("");
   const [msg, setMsg] = useState("");
@@ -217,6 +220,47 @@ export function ReviewPlanPanel({
   const loadGen = useRef(0);
   const hydrated = useHydrated();
   const clientNow = hydrated ? new Date() : null;
+  const { data: session } = useSession();
+  const isAdmin = session?.user?.role === "ADMIN";
+
+  const loadAutoDispatchStatus = useCallback(async () => {
+    try {
+      const res = await fetch("/api/review-dispatch/control");
+      if (!res.ok) return;
+      const data = (await res.json()) as { paused?: boolean };
+      setAutoDispatchPaused(Boolean(data.paused));
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadAutoDispatchStatus();
+  }, [loadAutoDispatchStatus]);
+
+  async function setAutoDispatchPausedState(paused: boolean) {
+    if (!isAdmin) return;
+    setAutoDispatchBusy(true);
+    setError("");
+    try {
+      const res = await fetch("/api/review-dispatch/control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paused }),
+      });
+      const data = (await res.json()) as { error?: string; message?: string; paused?: boolean };
+      if (!res.ok) {
+        setError(data.error || "Không đổi được trạng thái đăng tự động");
+        return;
+      }
+      setAutoDispatchPaused(Boolean(data.paused));
+      setMsg(data.message || (paused ? "Đã dừng đăng tự động" : "Đã bật đăng tự động"));
+    } catch {
+      setError("Không kết nối được máy chủ");
+    } finally {
+      setAutoDispatchBusy(false);
+    }
+  }
 
   useEffect(() => {
     setMediaCount(initialMediaCount);
@@ -444,12 +488,27 @@ export function ReviewPlanPanel({
 
   useEffect(() => {
     if (!plan) return;
-    void loadEligible();
-    const t = setInterval(() => {
-      if (typeof document !== "undefined" && document.hidden) return;
-      void loadEligible();
-    }, 30_000);
-    return () => clearInterval(t);
+    const run = () => void loadEligible();
+    let intervalId: ReturnType<typeof setInterval> | undefined;
+    const startPoll = () => {
+      run();
+      intervalId = setInterval(() => {
+        if (typeof document !== "undefined" && document.hidden) return;
+        run();
+      }, 30_000);
+    };
+    if (typeof requestIdleCallback !== "undefined") {
+      const idleId = requestIdleCallback(startPoll, { timeout: 4000 });
+      return () => {
+        cancelIdleCallback(idleId);
+        if (intervalId) clearInterval(intervalId);
+      };
+    }
+    const t = window.setTimeout(startPoll, 800);
+    return () => {
+      clearTimeout(t);
+      if (intervalId) clearInterval(intervalId);
+    };
   }, [plan?.id, loadEligible]);
 
   const snapshotPlan = normalizeStarPlan(plan?.snapshot);
@@ -485,10 +544,6 @@ export function ReviewPlanPanel({
     !!plan &&
     plan.assignments.length > 0 &&
     plan.assignments.every((a) => !a.scheduledAt);
-
-  const planImageSummary = plan
-    ? summarizeImageCounts(plan.assignments.map((a) => assignmentMedia(a).length))
-    : null;
 
   async function loadPreview() {
     setError("");
@@ -747,29 +802,6 @@ export function ReviewPlanPanel({
     }
   }
 
-  const nextPending = [...(plan?.assignments ?? [])]
-    .filter((a) => a.status === "PENDING" && a.scheduledAt)
-    .sort(
-      (a, b) =>
-        new Date(a.scheduledAt!).getTime() - new Date(b.scheduledAt!).getTime(),
-    )[0];
-
-  const readyByScheduleCount = clientNow
-    ? (plan?.assignments.filter(
-        (a) =>
-          a.status === "PENDING" &&
-          getScheduleState(a.scheduledAt, clientNow) === "ready",
-      ).length ?? 0)
-    : 0;
-
-  const waitingByScheduleCount = clientNow
-    ? (plan?.assignments.filter(
-        (a) =>
-          a.status === "PENDING" &&
-          getScheduleState(a.scheduledAt, clientNow) === "waiting",
-      ).length ?? 0)
-    : 0;
-
   const overdueByScheduleCount = clientNow
     ? (plan?.assignments.filter(
         (a) =>
@@ -790,15 +822,9 @@ export function ReviewPlanPanel({
           <h2 className="font-display text-lg font-semibold tracking-tight text-[var(--ink)]">
             Kế hoạch đánh giá Maps
           </h2>
-          <p className="mt-1 text-sm text-[var(--muted)]">
-            Phân bổ sao + gán account READY. Mỗi bài có ngày giờ đăng (chỉnh được trong bảng).
-            Sao/lượt đánh giá lấy lúc tạo dự án
-            {ratingScannedAt
-              ? ` (chốt ${formatDateTimeVi(ratingScannedAt)})`
-              : ""}
-            — không quét lại realtime. Hệ thống đăng đúng lịch từng bài khi kế hoạch{" "}
-            <strong>RUNNING</strong> ({mediaCount} ảnh). Phân bổ sao và bảng kế hoạch lấy từ DB
-            (đã lưu khi lập), reload hiện ngay.
+          <p className="mt-1 text-xs text-[var(--muted)]">
+            Lịch đăng · gán mail · auto khi RUNNING
+            {ratingScannedAt ? ` · Sao chốt ${formatDateTimeVi(ratingScannedAt)}` : ""}
           </p>
         </div>
         {plan && <span className="badge badge-neutral">{plan.status}</span>}
@@ -811,79 +837,56 @@ export function ReviewPlanPanel({
       )}
 
       {displayPlan && (
-        <div className="rounded-[var(--radius-sm)] border border-[var(--line)] bg-[var(--surface-muted)] p-3 text-sm text-[var(--ink-soft)]">
-          <p>
-            <strong>Phân bổ sao</strong> ({displayPlan.reviewsToPost} bình luận / gói{" "}
-            {packageTargetContents}):{" "}
-            {formatStarDistribution(displayPlan.countsByStar) || "—"}
-          </p>
-          <p className="mt-1">
-            Rating: {displayPlan.currentRating}★ → dự kiến {displayPlan.projectedRating}★ (mục
-            tiêu {displayPlan.desiredRating}★, Δ {displayPlan.delta})
-          </p>
+        <div className="rounded-[var(--radius-sm)] border border-[var(--line)] bg-[var(--surface-muted)] px-3 py-2 text-xs text-[var(--ink-soft)]">
+          <span>
+            {formatStarDistribution(displayPlan.countsByStar) || "—"} →{" "}
+            {displayPlan.currentRating}★ dự kiến {displayPlan.projectedRating}★ (mục tiêu{" "}
+            {displayPlan.desiredRating}★)
+          </span>
           {readyProfileCount != null && (
-            <p className="mt-1 text-xs text-[var(--muted)]">
-              Mail READY (hệ thống): {readyProfileCount}
-              {eligibleSnap != null && (
-                <>
-                  {" "}
-                  · Khả dụng cho địa điểm này:{" "}
-                  <strong>{eligibleSnap.eligibleCount}</strong>
-                  {eligibleSnap.unassignedSlots > 0 && (
-                    <> · Slot chưa gán mail: {eligibleSnap.unassignedSlots}</>
-                  )}
-                </>
-              )}
-              {contentGenerated ? " · Nội dung đã sinh" : " · Chưa sinh nội dung"}
-              {mediaCount > 0 ? ` · Thư viện: ${mediaCount} ảnh` : ""}
-              {availableProxyCount != null
-                ? ` · Proxy khả dụng: ${availableProxyCount}`
-                : ""}
-              <span className="block mt-0.5">
-                1 mail = 1 bình luận / địa điểm — không tái sử dụng mail.
-              </span>
-            </p>
+            <span className="text-[var(--muted)]">
+              {" "}
+              · Mail READY: {readyProfileCount}
+              {eligibleSnap != null ? ` · Khả dụng: ${eligibleSnap.eligibleCount}` : ""}
+              {mediaCount > 0 ? ` · ${mediaCount} ảnh` : ""}
+            </span>
           )}
         </div>
       )}
 
       {eligibleSnap && eligibleSnap.unassignedSlots > 0 && plan && (
-        <div className="rounded-[var(--radius-sm)] border border-[var(--warn-soft)] bg-[var(--warn-soft)]/40 p-3 text-sm text-[var(--warn-ink)]">
-          <strong>{eligibleSnap.unassignedSlots}</strong> bài chưa gán mail ·{" "}
-          <strong>{eligibleSnap.eligibleCount}</strong> mail có thể gán cho địa điểm này.
-          <div className="mt-2 flex flex-wrap gap-2">
-            <button
-              type="button"
-              className="btn btn-sm btn-soft"
-              disabled={busy || eligibleSnap.eligibleCount === 0}
-              onClick={() => void fillEmptyProfiles()}
-            >
-              Tự gán slot trống
-            </button>
-            <button
-              type="button"
-              className="btn btn-sm btn-secondary"
-              disabled={busy}
-              onClick={() => void loadEligible()}
-            >
-              Làm mới mail khả dụng
-            </button>
-          </div>
-        </div>
+        <p className="text-xs text-[var(--warn-ink)]">
+          {eligibleSnap.unassignedSlots} bài chưa gán mail · {eligibleSnap.eligibleCount} mail khả dụng.{" "}
+          <button
+            type="button"
+            className="link-accent"
+            disabled={busy || eligibleSnap.eligibleCount === 0}
+            onClick={() => void fillEmptyProfiles()}
+          >
+            Tự gán
+          </button>
+          {" · "}
+          <button
+            type="button"
+            className="link-accent"
+            disabled={busy}
+            onClick={() => void loadEligible()}
+          >
+            Làm mới
+          </button>
+        </p>
       )}
 
       {planMissingSchedule && (
-        <div className="rounded-[var(--radius-sm)] border border-[var(--warn-soft)] bg-[var(--warn-soft)]/40 p-3 text-sm text-[var(--warn-ink)]">
-          Kế hoạch chưa có lịch đăng — bấm <strong>Lập kế hoạch</strong> lại để gán ngày giờ từng
-          bài.
-        </div>
+        <p className="text-xs text-[var(--warn-ink)]">
+          Chưa có lịch — bấm <strong>Lập kế hoạch</strong>.
+        </p>
       )}
 
       {planUsesLegacyImages && (
-        <div className="rounded-[var(--radius-sm)] border border-[var(--warn-soft)] bg-[var(--warn-soft)]/40 p-3 text-sm text-[var(--warn-ink)]">
-          Kế hoạch hiện tại được tạo trước khi hỗ trợ nhiều ảnh — mỗi bài chỉ có 1 ảnh. Bấm{" "}
-          <strong>Lập kế hoạch</strong> lại để random 1–3 ảnh/bài.
-        </div>
+        <p className="text-xs text-[var(--warn-ink)]">
+          Kế hoạch cũ (1 ảnh/bài) — <strong>Lập kế hoạch</strong> lại để random 1–3 ảnh.
+        </p>
       )}
 
       {!initialLoading && !displayPlan && planBlockers.length === 0 && (
@@ -893,16 +896,9 @@ export function ReviewPlanPanel({
       )}
 
       {!initialLoading && !canCreatePlan && planBlockers.length > 0 && (
-        <div className="rounded-[var(--radius-sm)] border border-[var(--warn-soft)] bg-[var(--warn-soft)]/40 p-3">
-          <p className="text-xs font-semibold uppercase tracking-wide text-[var(--warn-ink)]">
-            Chưa thể lập kế hoạch
-          </p>
-          <ul className="mt-2 space-y-1 text-sm text-[var(--warn-ink)]">
-            {planBlockers.map((b) => (
-              <li key={b}>• {b}</li>
-            ))}
-          </ul>
-        </div>
+        <p className="text-xs text-[var(--warn-ink)]">
+          Chưa lập được: {planBlockers.join(" · ")}
+        </p>
       )}
 
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -937,6 +933,38 @@ export function ReviewPlanPanel({
           >
           {plan?.status === "RUNNING" ? "Đăng 1 bài theo lịch" : "Kích hoạt lịch đăng"}
         </button>
+          {plan?.status === "RUNNING" && autoDispatchPaused != null && (
+            <>
+              <span
+                className={`badge ${autoDispatchPaused ? "badge-neutral text-[var(--warn-ink)]" : "badge-accent"}`}
+                title="Trạng thái enqueue tự động (mọi dự án)"
+              >
+                Tự động: {autoDispatchPaused ? "đã dừng" : "đang chạy"}
+              </span>
+              {isAdmin &&
+                (autoDispatchPaused ? (
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={busy || autoDispatchBusy}
+                    title="Bật lại loop đăng theo lịch (30s/tick)"
+                    onClick={() => void setAutoDispatchPausedState(false)}
+                  >
+                    {autoDispatchBusy ? "Đang…" : "Tiếp tục đăng tự động"}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    disabled={busy || autoDispatchBusy}
+                    title="Dừng enqueue tự động — job đang chạy vẫn tiếp tục; vẫn đăng tay được"
+                    onClick={() => void setAutoDispatchPausedState(true)}
+                  >
+                    {autoDispatchBusy ? "Đang…" : "Dừng đăng tự động"}
+                  </button>
+                ))}
+            </>
+          )}
           {completedAssignments.length > 0 && (
             <button
               type="button"
@@ -949,63 +977,18 @@ export function ReviewPlanPanel({
           )}
         </div>
       </div>
-      <p className="text-xs text-[var(--muted)]">
-        «Kích hoạt lịch đăng» chỉ bật lịch (RUNNING) — hệ thống đăng đúng giờ từng bài trong cửa sổ
-        lịch (mặc định 2 giờ sau mốc). Bài quá hạn hoặc lỗi không auto — hãy sửa ngày đăng / Lập kế
-        hoạch lại, hoặc bấm «Đăng» từng dòng.
-      </p>
-
-      {plan?.status === "RUNNING" &&
-        clientNow &&
-        (readyByScheduleCount > 0 ||
-          waitingByScheduleCount > 0 ||
-          overdueByScheduleCount > 0 ||
-          nextPending) && (
-        <p className="text-xs text-[var(--muted)]">
-          {readyByScheduleCount > 0 && (
-            <span className="text-[var(--accent-ink)]">
-              {readyByScheduleCount} bài trong cửa sổ lịch (auto)
-            </span>
-          )}
-          {readyByScheduleCount > 0 && waitingByScheduleCount > 0 && " · "}
-          {waitingByScheduleCount > 0 && (
-            <span>{waitingByScheduleCount} bài chờ lịch</span>
-          )}
-          {(readyByScheduleCount > 0 || waitingByScheduleCount > 0) &&
-            overdueByScheduleCount > 0 &&
-            " · "}
-          {overdueByScheduleCount > 0 && (
-            <span className="text-[var(--warn-ink)]">
-              {overdueByScheduleCount} quá hạn (lập lại / Đăng tay)
-            </span>
-          )}
-          {nextPending && getScheduleState(nextPending.scheduledAt, clientNow) === "waiting" && (
-            <>
-              {(readyByScheduleCount > 0 ||
-                waitingByScheduleCount > 0 ||
-                overdueByScheduleCount > 0) &&
-                " · "}
-              Bài tiếp theo: {formatScheduleDate(nextPending.scheduledAt)}
-            </>
-          )}
-        </p>
-      )}
 
       {(overdueByScheduleCount > 0 || failedAssignments.length > 0) && (
-        <div className="rounded-[var(--radius-sm)] border border-[var(--warn-soft)] bg-[var(--warn-soft)]/30 p-3 text-sm text-[var(--warn-ink)]">
+        <p className="text-xs text-[var(--warn-ink)]">
           {overdueByScheduleCount > 0 && (
-            <p>
-              <strong>{overdueByScheduleCount} bài quá hạn lịch</strong> — không tự đăng. Đổi «Ngày
-              đăng» sang mốc mới, hoặc bấm cột «Đăng» từng bài.
-            </p>
+            <span>
+              {overdueByScheduleCount} quá hạn — đổi ngày hoặc Đăng tay.{" "}
+            </span>
           )}
           {failedAssignments.length > 0 && (
-            <p className={overdueByScheduleCount > 0 ? "mt-1" : undefined}>
-              <strong>{failedAssignments.length} bài lỗi</strong> — sửa rồi Đăng tay, hoặc Lập kế
-              hoạch lại.
-            </p>
+            <span>{failedAssignments.length} lỗi — Đăng lại hoặc Lập kế hoạch.</span>
           )}
-        </div>
+        </p>
       )}
 
       {!plan && previewSamples && previewSamples.length > 0 && (
@@ -1084,11 +1067,6 @@ export function ReviewPlanPanel({
 
       {plan && plan.assignments.length > 0 && (
         <div className="space-y-2">
-          {planImageSummary && !planUsesLegacyImages && (
-            <p className="text-xs text-[var(--muted)]">
-              Phân bổ ảnh trong kế hoạch: {formatImageSummary(planImageSummary)}
-            </p>
-          )}
           <div className="overflow-x-auto">
             <table className="w-full min-w-[860px] text-left text-sm">
               <thead>

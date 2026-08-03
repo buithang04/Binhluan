@@ -161,10 +161,42 @@ export function pickUniqueProfilesForPlan<
   count: number,
   excludeProfileIds: ReadonlySet<string> = new Set(),
 ): (T | null)[] {
-  if (count <= 0) return [];
-  const used = new Set(excludeProfileIds);
+  return assignUniqueProfilesToSlots({
+    pool,
+    slotCount: count,
+    excludeIds: excludeProfileIds,
+  });
+}
+
+/**
+ * Gán mail cho từng slot — ưu tiên preserve theo index, không trùng trong plan.
+ * `excludeIds`: mail đã review / bị dự án khác giữ (cùng placeKey).
+ */
+export function assignUniqueProfilesToSlots<
+  T extends { id: string; account: { email: string } },
+>(input: {
+  pool: T[];
+  slotCount: number;
+  excludeIds?: ReadonlySet<string>;
+  preserveProfileIds?: ReadonlyArray<string | null | undefined>;
+}): (T | null)[] {
+  const { pool, slotCount } = input;
+  if (slotCount <= 0) return [];
+
+  const used = new Set(input.excludeIds ?? []);
   const result: (T | null)[] = [];
-  for (let i = 0; i < count; i++) {
+
+  for (let i = 0; i < slotCount; i++) {
+    const preservedId = input.preserveProfileIds?.[i];
+    if (preservedId && !used.has(preservedId)) {
+      const kept = pool.find((p) => p.id === preservedId);
+      if (kept) {
+        result.push(kept);
+        used.add(kept.id);
+        continue;
+      }
+    }
+
     const pick = pool.find((p) => !used.has(p.id));
     if (pick) {
       result.push(pick);
@@ -173,6 +205,7 @@ export function pickUniqueProfilesForPlan<
       result.push(null);
     }
   }
+
   return result;
 }
 

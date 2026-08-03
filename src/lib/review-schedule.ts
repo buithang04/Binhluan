@@ -1,6 +1,11 @@
 const VN_TZ = "Asia/Ho_Chi_Minh";
 const DAY_MS = 86_400_000;
 
+/** Bài đầu không sớm hơn now + lead (mặc định 15 phút). */
+export const SCHEDULE_MIN_LEAD_MS = 15 * 60_000;
+/** Khoảng cách tối thiểu giữa 2 mốc lịch liên tiếp (mặc định 15 phút). */
+export const SCHEDULE_MIN_SLOT_GAP_MS = 15 * 60_000;
+
 /** YYYY-MM-DD theo lịch VN. */
 export function vnCalendarDateString(value = new Date()): string {
   return new Intl.DateTimeFormat("en-CA", {
@@ -67,19 +72,20 @@ function startOfVnDay(value: Date): number {
 }
 
 /**
- * Đẩy mọi mốc lịch trước `notBefore` lên từ thời điểm hiện tại.
- * Giữ thứ tự tăng dần; các mốc sát nhau cách tối thiểu `minStepMs`.
+ * Đẩy mọi mốc lịch trước `notBefore + lead` lên; các mốc liên tiếp cách nhau ≥ gap.
+ * Giữ thứ tự tăng dần.
  */
 export function clampScheduleNotBefore(
   times: Date[],
   notBefore: Date,
-  minStepMs = 3 * 60_000,
+  minStepMs = SCHEDULE_MIN_SLOT_GAP_MS,
+  leadMs = SCHEDULE_MIN_LEAD_MS,
 ): Date[] {
   if (!times.length) return times;
   const out = times
     .map((t) => new Date(t.getTime()))
     .sort((a, b) => a.getTime() - b.getTime());
-  let cursor = notBefore.getTime() + minStepMs;
+  let cursor = notBefore.getTime() + leadMs;
   for (let i = 0; i < out.length; i++) {
     if (out[i]!.getTime() < cursor) {
       out[i] = new Date(cursor);

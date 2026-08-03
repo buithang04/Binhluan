@@ -305,39 +305,14 @@ export class ProfilesService {
       });
     });
 
-    // MAPS_REVIEW: ưu tiên sticky proxy (profile.proxyId hoặc proxy job MAPS gần nhất)
-    // để retry không đổi --proxy-server → không phải kill Chrome đang mở Maps.
+    // MAPS_REVIEW: proxy chỉ lock trên JobRun — KHÔNG gắn sticky lên Profile (browser = IP máy).
     if (taskCode === "MAPS_REVIEW") {
       try {
-        const lastMaps = await this.prisma.jobRun.findFirst({
-          where: {
-            profileId: id,
-            taskCode: "MAPS_REVIEW",
-            proxyId: { not: null },
-          },
-          orderBy: { createdAt: "desc" },
-          select: { proxyId: true },
-        });
-        const preferred =
-          profile.proxyId || lastMaps?.proxyId || null;
-        const proxy = await this.proxies.acquireRandomForJob(
-          jobRun.id,
-          30,
-          preferred,
-        );
+        const proxy = await this.proxies.acquireRandomForJob(jobRun.id, 30, null);
         await this.prisma.jobRun.update({
           where: { id: jobRun.id },
           data: { proxyId: proxy.id },
         });
-        // Ghi sticky lên profile để lần sau giữ nguyên
-        if (profile.proxyId !== proxy.id) {
-          await this.prisma.profile
-            .update({
-              where: { id },
-              data: { proxyId: proxy.id },
-            })
-            .catch(() => undefined);
-        }
       } catch (e) {
         // Rollback profile lease + job nếu không có proxy
         await this.prisma.$transaction([

@@ -56,27 +56,35 @@ export async function POST(_req: Request, ctx: Ctx) {
   const pool = snap?.profiles ?? [];
 
   let filled = 0;
+  const usedThisRun = new Set<string>();
   for (const slot of empty) {
-    const pick = pool.shift();
-    if (!pick) break;
-    const check = await assertProfileEligibleForPlace({
-      profileId: pick.id,
-      placeKey,
-      planId: plan.id,
-      excludeAssignmentId: slot.id,
-    });
-    if (!check.ok) continue;
+    let assigned = false;
+    while (pool.length) {
+      const pick = pool.shift()!;
+      if (usedThisRun.has(pick.id)) continue;
+      const check = await assertProfileEligibleForPlace({
+        profileId: pick.id,
+        placeKey,
+        planId: plan.id,
+        excludeAssignmentId: slot.id,
+      });
+      if (!check.ok) continue;
 
-    await prisma.reviewAssignment.update({
-      where: { id: slot.id },
-      data: {
-        apmProfileId: pick.id,
-        profileEmail: pick.email,
-        status: "PENDING",
-        error: null,
-      },
-    });
-    filled++;
+      await prisma.reviewAssignment.update({
+        where: { id: slot.id },
+        data: {
+          apmProfileId: pick.id,
+          profileEmail: pick.email,
+          status: "PENDING",
+          error: null,
+        },
+      });
+      usedThisRun.add(pick.id);
+      filled++;
+      assigned = true;
+      break;
+    }
+    if (!assigned) break;
   }
 
   const refreshed = await prisma.reviewPlan.findUnique({
