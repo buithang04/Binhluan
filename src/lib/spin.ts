@@ -123,6 +123,7 @@ export function buildProjectVariables(
     writing_notes: project.writingNotes || "",
     content_direction: project.contentDirection || "",
     content_language: project.contentLanguage === "EN" ? "English" : "Vietnamese",
+    real_review_samples: project.contentExample || "",
     content_example: project.contentExample || "",
     content_word_count:
       project.contentWordCount != null ? String(project.contentWordCount) : "",

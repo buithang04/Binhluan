@@ -10,13 +10,14 @@ import {
   prioritizeProfilesWith2Fa,
   assignUniqueProfilesToSlots,
 } from "@/lib/review-content";
-import { pickRandomMediaAssets, enrichPlanAssignments } from "@/lib/review-media";
+import { allocateUniqueMediaForPlan, enrichPlanAssignments } from "@/lib/review-media";
 import {
   adjustScheduleForProfileReuse,
   clampScheduleNotBefore,
   campaignEndDatePassedMessage,
   formatScheduleDate,
   isCampaignEndDatePassed,
+  isMapsDeletedAssignment,
   planReviewScheduleDates,
   SCHEDULE_MIN_LEAD_MS,
   SCHEDULE_MIN_SLOT_GAP_MS,
@@ -30,6 +31,7 @@ import { resolveProjectPlaceKey } from "@/lib/place-key";
 import {
   countDuplicatePlanProfiles,
   repairDuplicatePlanAssignments,
+  repairMapsDeletedSortOrder,
 } from "@/lib/review-plan-profiles";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -114,17 +116,21 @@ export async function GET(req: Request, ctx: Ctx) {
     return NextResponse.json({ plan: null, mediaCount: media.length });
   }
 
+  await repairMapsDeletedSortOrder(plan.id);
   if ((await countDuplicatePlanProfiles(plan.id)) > 0) {
     await repairDuplicatePlanAssignments(plan.id);
-    plan.assignments = await prisma.reviewAssignment.findMany({
-      where: { planId: plan.id },
-      orderBy: { sortOrder: "asc" },
-      include: { mediaAsset: { select: { id: true, filePath: true, fileName: true } } },
-    });
   }
+  plan.assignments = await prisma.reviewAssignment.findMany({
+    where: { planId: plan.id },
+    orderBy: { sortOrder: "asc" },
+    include: { mediaAsset: { select: { id: true, filePath: true, fileName: true } } },
+  });
 
   const completedProfileIds = plan.assignments
-    .filter((a) => a.status === "COMPLETED" && a.apmProfileId)
+    .filter(
+      (a) =>
+        (a.status === "COMPLETED" || a.status === "SKIPPED") && a.apmProfileId,
+    )
     .map((a) => a.apmProfileId as string);
   const ledgerByProfile = await fetchLedgerVisibilityByProfile(
     placeKey,
@@ -213,7 +219,12 @@ export async function POST(req: Request, ctx: Ctx) {
 
   const spinByStar = parseReviewSpinByStar(project.reviewSpinByStar);
 
-  /** Bài đã/đang đăng — không xóa, không đổi lịch/mail khi lập lại kế hoạch. */
+  /**
+   * Cố định khi lập lại:
+   * - Đã xóa trên Maps (SKIPPED) → giữ nguyên nội dung/mail/link, đưa lên đầu
+   * - COMPLETED / QUEUED / RUNNING → giữ nguyên
+   * Chỉ xóa + lập lại PENDING / FAILED (và SKIPPED thường nếu có).
+   */
   const LOCKED_ASSIGNMENT_STATUSES = ["COMPLETED", "QUEUED", "RUNNING"] as const;
 
   const existingPlan = await prisma.reviewPlan.findFirst({
@@ -224,36 +235,47 @@ export async function POST(req: Request, ctx: Ctx) {
     orderBy: { createdAt: "desc" },
     include: {
       assignments: {
-        where: {
-          status: {
-            in: ["PENDING", "FAILED", "COMPLETED", "QUEUED", "RUNNING"],
-          },
-        },
         orderBy: { sortOrder: "asc" },
       },
     },
   });
+
+  const deletedKeep = [
+    ...(existingPlan?.assignments.filter((a) => isMapsDeletedAssignment(a)) ??
+      []),
+  ].sort((a, b) => a.sortOrder - b.sortOrder);
+
   const lockedKeep = [
-    ...(existingPlan?.assignments.filter((a) =>
-      (LOCKED_ASSIGNMENT_STATUSES as readonly string[]).includes(a.status),
+    ...(existingPlan?.assignments.filter(
+      (a) =>
+        (LOCKED_ASSIGNMENT_STATUSES as readonly string[]).includes(a.status) &&
+        !isMapsDeletedAssignment(a),
     ) ?? []),
   ].sort((a, b) => a.sortOrder - b.sortOrder);
+
+  /** Prefix cố định: đã xóa → đã/đang đăng */
+  const fixedKeep = [...deletedKeep, ...lockedKeep];
+  const fixedCount = fixedKeep.length;
+
   const preservePending = [
-    ...(existingPlan?.assignments.filter((a) =>
-      ["PENDING", "FAILED"].includes(a.status),
+    ...(existingPlan?.assignments.filter(
+      (a) =>
+        ["PENDING", "FAILED"].includes(a.status) && !isMapsDeletedAssignment(a),
     ) ?? []),
   ].sort((a, b) => a.sortOrder - b.sortOrder);
-  const remainingSlots = Math.max(0, reviewsToPost - lockedKeep.length);
+
+  const remainingSlots = Math.max(0, reviewsToPost - fixedCount);
   if (remainingSlots === 0 && preservePending.length === 0) {
     return NextResponse.json(
       {
-        error: `Đã có ${lockedKeep.length} bài đã/đang đăng — đủ gói ${reviewsToPost}, không cần lập lại`,
+        error: `Đã có ${deletedKeep.length} bài đã xóa + ${lockedKeep.length} bài đã/đang đăng — đủ gói ${reviewsToPost}, không cần lập lại`,
       },
       { status: 400 },
     );
   }
 
   const blockedAtPlace = await getBlockedProfileIdsForPlace(placeKey);
+  // Mail đang/đã đăng (COMPLETED…) không gán lại; mail đã xóa (ledger DELETED) được phép đăng lại
   for (const c of lockedKeep) {
     if (c.apmProfileId) blockedAtPlace.add(c.apmProfileId);
   }
@@ -262,23 +284,49 @@ export async function POST(req: Request, ctx: Ctx) {
   const reservedSamePlace = await getProfileIdsReservedForPlace(placeKey, {
     excludeProjectId: id,
   });
-  const excludeForPick = new Set<string>([...blockedAtPlace, ...reservedSamePlace]);
+  const strictExclude = new Set<string>([...blockedAtPlace, ...reservedSamePlace]);
+  const baseUsed = new Set<string>(blockedAtPlace);
 
-  const pool = prioritizeProfilesWith2Fa(
-    (
-      await prisma.profile.findMany({
-        where: availableReviewProfileWhere(now),
-        include: { account: { select: { email: true, totpSecretEnc: true } } },
-      })
-    ).filter((p) => !blockedAtPlace.has(p.id)),
+  const allReadyProfiles = await prisma.profile.findMany({
+    where: availableReviewProfileWhere(now),
+    include: { account: { select: { email: true, totpSecretEnc: true } } },
+  });
+
+  // Lượt 1: pool strict (không đụng reserved ở project khác)
+  const strictPool = prioritizeProfilesWith2Fa(
+    allReadyProfiles.filter((p) => !strictExclude.has(p.id)),
   );
-
   const assignedProfiles = assignUniqueProfilesToSlots({
-    pool,
+    pool: strictPool,
     slotCount: remainingSlots,
-    excludeIds: excludeForPick,
+    excludeIds: baseUsed,
     preserveProfileIds: preservePending.map((p) => p.apmProfileId),
   });
+
+  // Lượt 2 fallback: nếu còn thiếu, cho phép dùng cả mail đang reserved ở project khác
+  // (vẫn không dùng mail đã review place và không trùng trong cùng plan).
+  const missingIdx: number[] = [];
+  for (let i = 0; i < assignedProfiles.length; i++) {
+    if (!assignedProfiles[i]) missingIdx.push(i);
+  }
+  if (missingIdx.length > 0) {
+    const usedNow = new Set<string>(baseUsed);
+    for (const p of assignedProfiles) {
+      if (p?.id) usedNow.add(p.id);
+    }
+    const fallbackPool = prioritizeProfilesWith2Fa(
+      allReadyProfiles.filter((p) => !blockedAtPlace.has(p.id)),
+    );
+    const fallbackAssigned = assignUniqueProfilesToSlots({
+      pool: fallbackPool,
+      slotCount: missingIdx.length,
+      excludeIds: usedNow,
+    });
+    for (let i = 0; i < missingIdx.length; i++) {
+      const idx = missingIdx[i]!;
+      assignedProfiles[idx] = fallbackAssigned[i] ?? null;
+    }
+  }
 
   const profileIdsForNewSlots = assignedProfiles.map((p, i) => p?.id ?? `empty-${i}`);
 
@@ -311,7 +359,8 @@ export async function POST(req: Request, ctx: Ctx) {
     reviewsToPost,
   });
 
-  const newSlots = planned.slots.slice(lockedKeep.length);
+  // Star slots cho phần còn lại (bỏ qua các slot đã chiếm bởi fixedKeep)
+  const newSlots = planned.slots.slice(fixedCount);
 
   const neededStars = new Set(newSlots.map((s) => String(s.stars)));
   for (const s of neededStars) {
@@ -324,16 +373,17 @@ export async function POST(req: Request, ctx: Ctx) {
   }
 
   const media = project.media;
+  const allocatedMedia = allocateUniqueMediaForPlan(newSlots, media);
 
   const newAssignmentsData = newSlots.map((slot, i) => {
-    const sortOrder = lockedKeep.length + i;
+    const sortOrder = fixedCount + i;
     const reviewText = resolveReviewTextForStar(
       slot.stars,
       spinByStar,
       project,
       project.brandName,
     );
-    const pickedMedia = media.length ? pickRandomMediaAssets(media) : [];
+    const pickedMedia = allocatedMedia[i] ?? [];
     const profile = assignedProfiles[i] ?? null;
     return {
       sortOrder,
@@ -365,10 +415,11 @@ export async function POST(req: Request, ctx: Ctx) {
     profileCount: assignedCount,
     profilesAssigned: assignedCount,
     unassignedSlots,
-    eligibleAtPlanTime: pool.length,
+    eligibleAtPlanTime: strictPool.length,
     placeKey,
     profileReuse: false,
     ratingScannedAt: project.ratingScannedAt,
+    deletedKept: deletedKeep.length,
     completedKept: lockedKeep.length,
     remainingPlanned: newAssignmentsData.length,
   };
@@ -384,16 +435,36 @@ export async function POST(req: Request, ctx: Ctx) {
     });
 
     if (existingPlan) {
-      for (let i = 0; i < lockedKeep.length; i++) {
+      // 1) Đã xóa → đầu danh sách (không đụng nội dung/mail)
+      for (let i = 0; i < deletedKeep.length; i++) {
         await tx.reviewAssignment.update({
-          where: { id: lockedKeep[i]!.id },
+          where: { id: deletedKeep[i]!.id },
           data: { sortOrder: i },
         });
       }
+      // 2) Đã/đang đăng → tiếp theo
+      for (let i = 0; i < lockedKeep.length; i++) {
+        await tx.reviewAssignment.update({
+          where: { id: lockedKeep[i]!.id },
+          data: { sortOrder: deletedKeep.length + i },
+        });
+      }
+      // 3) Chỉ xóa slot chưa đăng / lỗi — không đụng bài đã xóa Maps
       await tx.reviewAssignment.deleteMany({
         where: {
           planId: existingPlan.id,
           status: { in: ["PENDING", "FAILED"] },
+        },
+      });
+      // SKIPPED thường (không phải xóa Maps) — bỏ khi lập lại
+      const deletedIds = deletedKeep.map((d) => d.id);
+      await tx.reviewAssignment.deleteMany({
+        where: {
+          planId: existingPlan.id,
+          status: "SKIPPED",
+          ...(deletedIds.length
+            ? { id: { notIn: deletedIds } }
+            : {}),
         },
       });
       if (newAssignmentsData.length) {
@@ -466,13 +537,20 @@ export async function POST(req: Request, ctx: Ctx) {
   }
 
   let message: string | undefined;
-  if (lockedKeep.length > 0) {
-    message = `Đã giữ ${lockedKeep.length} bài đã/đang đăng, lập ${newAssignmentsData.length} bài còn lại từ ${formatScheduleHint(now)} — gán ${assignedCount} mail`;
+  if (fixedCount > 0) {
+    const parts: string[] = [];
+    if (deletedKeep.length > 0) {
+      parts.push(`giữ ${deletedKeep.length} bài đã xóa (đầu danh sách, không lập lại)`);
+    }
+    if (lockedKeep.length > 0) {
+      parts.push(`giữ ${lockedKeep.length} bài đã/đang đăng`);
+    }
+    message = `Đã ${parts.join(", ")}, lập ${newAssignmentsData.length} bài còn lại từ ${formatScheduleHint(now)} — gán ${assignedCount} mail`;
   } else {
     message = `Đã lập kế hoạch từ ${formatScheduleHint(now)} — gán ${assignedCount}/${remainingSlots} mail (1 mail / 1 bình luận / địa điểm)`;
   }
   if (unassignedSlots > 0) {
-    message += `. ${unassignedSlots} bài chưa có mail — bổ sung account hoặc chọn mail thủ công.`;
+    message += `. ${unassignedSlots} bài chưa có mail — bấm Tự gán hoặc chọn thủ công (còn ${strictPool.length} mail strict lúc lập).`;
   }
   if (repairedDupes > 0) {
     message = `${message ?? ""} Đã gỡ ${repairedDupes} mail trùng trong kế hoạch.`.trim();

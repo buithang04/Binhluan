@@ -2472,7 +2472,7 @@ async function addImages(
   }
 }
 
-/** Chỉ nhận URL review Maps thật — loại gstatic / CSS / widget. */
+/** URL review Maps thật — không nhận trang contrib tổng (mọi đánh giá của user). */
 function isGoodReviewLink(u: string | null | undefined): u is string {
   if (!u || typeof u !== "string") return false;
   const s = u.trim();
@@ -2484,7 +2484,11 @@ function isGoodReviewLink(u: string | null | undefined): u is string {
   ) {
     return false;
   }
-  return /maps\/reviews|\/maps\/contrib\/\d+|local\/reviews|review\/data|maps\.app\.goo\.gl|goo\.gl\/maps|share\.google/i.test(
+  // /maps/contrib/123/reviews (không có cid/place) = trang hồ sơ — không chứng minh đã đăng place này
+  if (/\/maps\/contrib\/\d+\/reviews\/?(\?|$)/i.test(s) && !/!1s|cid=|place/i.test(s)) {
+    return false;
+  }
+  return /maps\/reviews|\/maps\/contrib\/\d+.+|local\/reviews|review\/data|maps\.app\.goo\.gl|goo\.gl\/maps|share\.google/i.test(
     s,
   );
 }
@@ -2746,8 +2750,19 @@ async function finishThankYou(page: Page, timeoutMs = 45_000) {
     }
 
     if (!stillWriting && Date.now() - start > 14_000) {
+      // Form đóng nhưng chưa có link review thật → chưa coi là đăng thành công
+      if (!isGoodReviewLink(bestLink)) {
+        console.warn(
+          `[maps-review] form đóng nhưng chưa có reviewLink hợp lệ — chưa xác nhận đăng ${lastDump}`,
+        );
+        return {
+          ok: false as const,
+          reviewLink: null,
+          pointsText: bestPoints,
+        };
+      }
       console.log(
-        `[maps-review] form đánh giá đã đóng — coi như đã đăng (link=${bestLink || "n/a"}, thank=${sawThank}) ${lastDump}`,
+        `[maps-review] form đánh giá đã đóng — coi như đã đăng (link=${bestLink}, thank=${sawThank}) ${lastDump}`,
       );
       return {
         ok: true as const,
@@ -3893,6 +3908,21 @@ export async function postMapsReview(
   }
 
   if (!isGoodReviewLink(reviewLink)) reviewLink = null;
+
+  // Có "ok" nhưng chỉ link contrib tổng / không link → bắt buộc thấy bài trên place
+  if (ok && !reviewLink) {
+    const verified = await verifyReviewPosted(page, payload.reviewText);
+    if (verified) {
+      console.log(
+        "[maps-review] thiếu reviewLink đẹp nhưng đã thấy nội dung trên place — giữ thành công",
+      );
+    } else {
+      console.warn(
+        "[maps-review] thiếu reviewLink hợp lệ và không thấy bài trên place — coi thất bại",
+      );
+      ok = false;
+    }
+  }
 
   return {
     ok,

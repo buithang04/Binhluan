@@ -53,6 +53,7 @@ export async function POST(_req: Request, ctx: Ctx) {
   const dispatch = await dispatchDueReviewAssignments({
     projectId: id,
     assignmentId,
+    ignorePause: true,
   });
 
   const refreshed = await prisma.reviewPlan.findUnique({

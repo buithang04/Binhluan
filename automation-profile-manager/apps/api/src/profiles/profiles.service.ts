@@ -3,7 +3,14 @@ import {
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
-import { createProfileSchema, enqueueTaskSchema, TaskCode } from "@apm/shared";
+import {
+  createProfileSchema,
+  enqueueTaskSchema,
+  mapsDeleteReviewPayloadSchema,
+  mapsReviewPayloadSchema,
+  TaskCode,
+  type ProfileTaskJob,
+} from "@apm/shared";
 import { randomUUID } from "crypto";
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
@@ -260,9 +267,17 @@ export class ProfilesService {
 
   async enqueue(id: string, body: unknown) {
     const parsed = enqueueTaskSchema.parse(body ?? {});
-    const { taskCode, payload } = parsed;
-    if (taskCode === "MAPS_REVIEW" && !payload) {
-      throw new BadRequestException("MAPS_REVIEW requires payload");
+    const { taskCode } = parsed;
+    let payload = parsed.payload ?? null;
+    if (taskCode === "MAPS_REVIEW") {
+      if (!payload) throw new BadRequestException("MAPS_REVIEW requires payload");
+      payload = mapsReviewPayloadSchema.parse(payload);
+    }
+    if (taskCode === "MAPS_DELETE_REVIEW") {
+      if (!payload) {
+        throw new BadRequestException("MAPS_DELETE_REVIEW requires payload");
+      }
+      payload = mapsDeleteReviewPayloadSchema.parse(payload);
     }
     const profile = await this.get(id);
     if (profile.status === "DISABLED") {
@@ -275,12 +290,15 @@ export class ProfilesService {
     const leaseToken = randomUUID();
     // LOGIN có captcha/verify — lease dài; task khác 5 phút
     // MAPS_REVIEW chạy 5–15 phút (gõ như người) — lease phải dài hơn job timeout
+    // MAPS_DELETE_REVIEW: không proxy, thường < 5 phút
     const leaseMs =
       taskCode === "LOGIN"
         ? 45 * 60 * 1000
         : taskCode === "MAPS_REVIEW"
           ? 30 * 60 * 1000
-          : 5 * 60 * 1000;
+          : taskCode === "MAPS_DELETE_REVIEW"
+            ? 15 * 60 * 1000
+            : 5 * 60 * 1000;
     const leaseUntil = new Date(Date.now() + leaseMs);
 
     const jobRun = await this.prisma.$transaction(async (tx) => {
@@ -343,7 +361,7 @@ export class ProfilesService {
       taskCode: taskCode as TaskCode,
       leaseToken,
       jobRunId: jobRun.id,
-      payload: payload ?? null,
+      payload: (payload ?? null) as ProfileTaskJob["payload"],
     });
 
     return { jobRunId: jobRun.id, leaseToken, taskCode };

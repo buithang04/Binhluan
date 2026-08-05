@@ -8,6 +8,11 @@ import {
   getEligibleProfilesForProject,
 } from "@/lib/eligible-profiles";
 import { resolveProjectPlaceKey } from "@/lib/place-key";
+import {
+  availableReviewProfileWhere,
+  prioritizeProfilesWith2Fa,
+} from "@/lib/review-content";
+import { getBlockedProfileIdsForPlace } from "@/lib/profile-place-review";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -53,7 +58,7 @@ export async function POST(_req: Request, ctx: Ctx) {
 
   const placeKey = resolveProjectPlaceKey(project.googleMapsUrl, project.placeKey);
   const snap = await getEligibleProfilesForProject(id, { planId: plan.id });
-  const pool = snap?.profiles ?? [];
+  const pool = [...(snap?.profiles ?? [])];
 
   let filled = 0;
   const usedThisRun = new Set<string>();
@@ -85,6 +90,51 @@ export async function POST(_req: Request, ctx: Ctx) {
       break;
     }
     if (!assigned) break;
+  }
+
+  // Fallback: vẫn còn slot trống -> dùng toàn bộ mail READY chưa review place
+  // (không trùng trong plan hiện tại, không trùng trong lượt chạy này).
+  if (filled < empty.length) {
+    const blockedAtPlace = await getBlockedProfileIdsForPlace(placeKey);
+    const allReady = prioritizeProfilesWith2Fa(
+      await prisma.profile.findMany({
+        where: availableReviewProfileWhere(new Date()),
+        include: { account: { select: { email: true, totpSecretEnc: true } } },
+      }),
+    ).filter((p) => !blockedAtPlace.has(p.id));
+
+    const alreadyUsedInPlan = new Set(
+      (
+        await prisma.reviewAssignment.findMany({
+          where: {
+            planId: plan.id,
+            status: { in: ["PENDING", "QUEUED", "RUNNING", "FAILED"] },
+            apmProfileId: { not: null },
+          },
+          select: { apmProfileId: true },
+        })
+      )
+        .map((r) => r.apmProfileId)
+        .filter(Boolean) as string[],
+    );
+    for (const id of usedThisRun) alreadyUsedInPlan.add(id);
+
+    const remainingSlots = empty.slice(filled);
+    for (const slot of remainingSlots) {
+      const pick = allReady.find((p) => !alreadyUsedInPlan.has(p.id));
+      if (!pick) break;
+      await prisma.reviewAssignment.update({
+        where: { id: slot.id },
+        data: {
+          apmProfileId: pick.id,
+          profileEmail: pick.account.email,
+          status: "PENDING",
+          error: null,
+        },
+      });
+      alreadyUsedInPlan.add(pick.id);
+      filled++;
+    }
   }
 
   const refreshed = await prisma.reviewPlan.findUnique({

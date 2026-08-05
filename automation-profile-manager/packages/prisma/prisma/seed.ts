@@ -63,6 +63,18 @@ async function main() {
     },
   });
 
+  await prisma.taskDefinition.upsert({
+    where: { code: "MAPS_DELETE_REVIEW" },
+    update: {},
+    create: {
+      code: "MAPS_DELETE_REVIEW",
+      name: "Delete Google Maps review",
+      timeoutMs: 480000,
+      maxRetries: 1,
+      handlerKey: "maps.deleteReview",
+    },
+  });
+
   const proxy = await prisma.proxy.upsert({
     where: { host_port: { host: "127.0.0.1", port: 8080 } },
     update: {},

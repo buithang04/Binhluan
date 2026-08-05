@@ -44,9 +44,13 @@ export class QueueService implements OnModuleDestroy {
   }
 
   async enqueue(job: ProfileTaskJob) {
-    // LOGIN / MAPS_REVIEW không retry — tránh lease mismatch / đăng review trùng
+    // LOGIN / MAPS_* không retry — tránh lease mismatch / thao tác trùng trên Maps
     const attempts =
-      job.taskCode === "LOGIN" || job.taskCode === "MAPS_REVIEW" ? 1 : 3;
+      job.taskCode === "LOGIN" ||
+      job.taskCode === "MAPS_REVIEW" ||
+      job.taskCode === "MAPS_DELETE_REVIEW"
+        ? 1
+        : 3;
     return this.profileTasks.add(job.taskCode, job, {
       jobId: job.jobRunId,
       attempts,

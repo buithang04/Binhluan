@@ -46,6 +46,9 @@ type ImportResult = {
   errorCount?: number;
   message?: string;
   createdIds?: Array<{ id: string; email: string }>;
+  autoAssigned?: number;
+  autoAssignFailed?: number;
+  autoAssignErrors?: Array<{ accountId: string; email: string; error: string }>;
   errors?: Array<{ row: number; email?: string; error: string }>;
 };
 
@@ -164,7 +167,7 @@ export default function AdminAccountsPage() {
   const [importRows, setImportRows] = useState<ImportAccountRow[]>([]);
   const [importFileName, setImportFileName] = useState("");
   const [updateExisting, setUpdateExisting] = useState(false);
-  const [importAutoAssign, setImportAutoAssign] = useState(false);
+  const [importAutoAssign, setImportAutoAssign] = useState(true);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<(typeof PAGE_SIZE_OPTIONS)[number]>(20);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
@@ -343,57 +346,10 @@ export default function AdminAccountsPage() {
         body: JSON.stringify({
           accounts: importRows,
           updateExisting,
+          autoAssignAfterImport: importAutoAssign,
         }),
       });
-
-      let extra = "";
-      if (importAutoAssign && res.createdIds?.length) {
-        // 1 hồ sơ / lần: tạo browser + LOGIN, chờ xong rồi mới acc tiếp
-        let done = 0;
-        for (const row of res.createdIds) {
-          try {
-            await apmFetch("/profiles/auto-assign", token, {
-              method: "POST",
-              body: JSON.stringify({ accountId: row.id, openLogin: true }),
-            });
-            done += 1;
-            setMessage(
-              `Đang đăng nhập lần lượt ${done}/${res.createdIds.length}: ${row.email}…`,
-            );
-            // RECAPTCHA có thể kéo dài — tối đa ~12 phút / acc
-            let deadline = Date.now() + 12 * 60_000;
-            while (Date.now() < deadline) {
-              await new Promise((r) => setTimeout(r, 2500));
-              const list = await apmFetch<Account[]>("/accounts", token);
-              const acc = (Array.isArray(list) ? list : []).find((a) => a.id === row.id);
-              if (!acc) break;
-              if (acc.status === "READY") break;
-              if (isWaitingManualSolve(acc.loginIssue)) {
-                // Gia hạn deadline khi đang chờ giải tay
-                deadline = Math.max(deadline, Date.now() + 8 * 60_000);
-                setMessage(
-                  `DỪNG — ${row.email}: chờ giải reCAPTCHA / xác minh tay trên Chrome (#${acc.profile?.browserIndex ?? "?"}). Không sang tài khoản tiếp.`,
-                );
-                continue;
-              }
-              if (isPermanentLoginIssue(acc.loginIssue)) break;
-              // Hết RUNNING/QUEUED LOGIN → coi như xong vòng này
-              const task = acc.profile?.status;
-              if (task && task !== "QUEUED" && task !== "RUNNING" && task !== "READY") {
-                if (!acc.profile?.browserAlive || isPermanentLoginIssue(acc.loginIssue)) break;
-              }
-            }
-          } catch {
-            /* proxy hết / lỗi — sang acc tiếp */
-          }
-        }
-        extra =
-          done > 0
-            ? ` · Đã chạy đăng nhập lần lượt ${done}/${res.createdIds.length} (1 hồ sơ / lần).`
-            : " · Không mở được Chrome (lỗi tạo hồ sơ / đăng nhập).";
-      }
-
-      setMessage((res.message || "Nhập xong") + extra);
+      setMessage(res.message || "Nhập xong");
       if (res.errors?.length) {
         const sample = res.errors
           .slice(0, 5)
@@ -967,7 +923,7 @@ export default function AdminAccountsPage() {
               checked={importAutoAssign}
               onChange={(e) => setImportAutoAssign(e.target.checked)}
             />
-            Sau nhập: tạo hồ sơ + đăng nhập lần lượt (1 hồ sơ xong mới tới hồ sơ tiếp)
+            Sau nhập: tự gán hồ sơ trên server (thoát Admin vẫn tiếp tục chạy)
           </label>
           <div className="flex flex-wrap gap-2">
             <button

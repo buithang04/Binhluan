@@ -14,6 +14,7 @@ import {
   formatScheduleDate,
   getScheduleState,
   isCampaignEndDatePassed,
+  isMapsDeletedAssignment,
   scheduleStateLabel,
 } from "@/lib/review-schedule";
 import { readApiJson } from "@/lib/api-client";
@@ -67,7 +68,7 @@ function reviewVisibilityLabel(v: string | null | undefined): string {
     case "VISIBLE":
       return "Còn hiển thị";
     case "DELETED":
-      return "Đã mất";
+      return "Đã xóa";
     case "HIDDEN":
       return "Ẩn";
     case "UNKNOWN":
@@ -137,7 +138,9 @@ type EligibleSnap = {
   unassignedSlots: number;
   eligibleCount: number;
   blockedAtPlaceCount: number;
+  needsVerifyCount: number;
   readyTotalCount: number;
+  assignedInPlanCount: number;
   profiles: Array<{
     id: string;
     email: string;
@@ -203,6 +206,9 @@ export function ReviewPlanPanel({
   const [savingScheduleId, setSavingScheduleId] = useState<string | null>(null);
   const [savingProfileId, setSavingProfileId] = useState<string | null>(null);
   const [verifyingId, setVerifyingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [selectedDeleteIds, setSelectedDeleteIds] = useState<string[]>([]);
+  const [bulkDeleteBusy, setBulkDeleteBusy] = useState(false);
   const [verifyAllBusy, setVerifyAllBusy] = useState(false);
   const [autoDispatchPaused, setAutoDispatchPaused] = useState<boolean | null>(null);
   const [autoDispatchBusy, setAutoDispatchBusy] = useState(false);
@@ -225,14 +231,16 @@ export function ReviewPlanPanel({
 
   const loadAutoDispatchStatus = useCallback(async () => {
     try {
-      const res = await fetch("/api/review-dispatch/control");
+      const res = await fetch(
+        `/api/review-dispatch/control?projectId=${encodeURIComponent(projectId)}`,
+      );
       if (!res.ok) return;
       const data = (await res.json()) as { paused?: boolean };
       setAutoDispatchPaused(Boolean(data.paused));
     } catch {
       /* ignore */
     }
-  }, []);
+  }, [projectId]);
 
   useEffect(() => {
     void loadAutoDispatchStatus();
@@ -246,7 +254,7 @@ export function ReviewPlanPanel({
       const res = await fetch("/api/review-dispatch/control", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ paused }),
+        body: JSON.stringify({ paused, projectId }),
       });
       const data = (await res.json()) as { error?: string; message?: string; paused?: boolean };
       if (!res.ok) {
@@ -470,21 +478,31 @@ export function ReviewPlanPanel({
     void load();
   }, [load, loadInfra, hydratedFromServer]);
 
+  const hasDeletingAssignment = Boolean(
+    plan?.assignments.some((a) => /Đang xóa trên Maps/i.test(a.error || "")),
+  );
+
   useEffect(() => {
-    if (!plan || (plan.status !== "RUNNING" && plan.status !== "READY")) return;
+    if (!plan) return;
     const hasActive = plan.assignments.some((a) =>
       ["QUEUED", "RUNNING", "PENDING"].includes(a.status),
     );
-    if (!hasActive && plan.status !== "RUNNING") return;
+    const shouldPoll =
+      hasDeletingAssignment ||
+      hasActive ||
+      plan.status === "RUNNING" ||
+      plan.status === "READY";
+    if (!shouldPoll) return;
 
     const tick = () => {
       if (typeof document !== "undefined" && document.hidden) return;
       setScheduleTick((n) => n + 1);
       void load({ light: true });
     };
-    const t = setInterval(tick, 20_000);
+    // Đang xóa: poll 2.5s để UI tự hiện "Đã xóa" không cần reload
+    const t = setInterval(tick, hasDeletingAssignment ? 2_500 : 20_000);
     return () => clearInterval(t);
-  }, [plan?.id, plan?.status, load]);
+  }, [plan?.id, plan?.status, hasDeletingAssignment, load]);
 
   useEffect(() => {
     if (!plan) return;
@@ -744,6 +762,247 @@ export function ReviewPlanPanel({
     }
   }
 
+  async function deleteAssignmentReview(
+    assignmentId: string,
+    opts?: { forceRetry?: boolean },
+  ) {
+    const forceRetry = !!opts?.forceRetry;
+    if (
+      !window.confirm(
+        forceRetry
+          ? "Xóa lại bài này trên Google Maps?\n\nDùng khi trước đó báo Đã xóa nhưng bài vẫn còn trên Maps."
+          : "Xóa bình luận này trên Google Maps?\n\n• Chỉ báo Đã xóa khi Maps xác nhận\n• Giữ dòng trong kế hoạch\n• Chrome tự đóng sau khi xong",
+      )
+    ) {
+      return;
+    }
+    setError("");
+    setMsg("");
+    setDeletingId(assignmentId);
+    // Optimistic: hiện "Đang xóa…" ngay, kích hoạt poll
+    setPlan((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        assignments: prev.assignments.map((a) =>
+          a.id === assignmentId
+            ? {
+                ...a,
+                status: "COMPLETED",
+                error: "Đang xóa trên Maps…",
+                reviewVisibility: null,
+              }
+            : a,
+        ),
+      };
+    });
+    try {
+      const qs = forceRetry ? "?force=1" : "";
+      const res = await fetch(
+        `/api/projects/${projectId}/review-plan/assignments/${assignmentId}/delete-review${qs}`,
+        { method: "POST" },
+      );
+      const data = await readApiJson<{
+        error?: string;
+        plan?: Plan;
+        message?: string;
+        alreadyDeleted?: boolean;
+        canRetry?: boolean;
+      }>(res);
+      if (!res.ok) {
+        setError(data.error || "Xóa bình luận thất bại");
+        await load({ light: true });
+        return;
+      }
+      if (data.plan) setPlan(data.plan);
+      setMsg(data.message || "Đang xóa trên Maps…");
+
+      if (data.alreadyDeleted && !forceRetry) {
+        setMsg(
+          data.canRetry
+            ? "Đang đánh dấu đã xóa — nếu còn trên Maps hãy bấm Xóa lại"
+            : data.message || "Bài đã xóa trên Maps",
+        );
+        await load();
+        return;
+      }
+
+      // Poll đến khi status Đã xóa / lỗi / hết giờ — không cần F5
+      const deadline = Date.now() + 4 * 60_000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2500));
+        await load({ light: true });
+        const checkRes = await fetch(
+          `/api/projects/${projectId}/review-plan?light=1`,
+        );
+        if (!checkRes.ok) continue;
+        const checkData = await readApiJson<{
+          plan?: {
+            assignments?: Array<{
+              id: string;
+              status: string;
+              error: string | null;
+            }>;
+          } | null;
+        }>(checkRes);
+        const row = checkData.plan?.assignments?.find((a) => a.id === assignmentId);
+        if (!row) continue;
+        if (isMapsDeletedAssignment(row)) {
+          setMsg("Đã xóa trên Maps — kế hoạch đã cập nhật");
+          await load();
+          break;
+        }
+        if (
+          row.error &&
+          !/Đang xóa trên Maps/i.test(row.error) &&
+          /xóa thất bại|không xóa|không tìm thấy|không thấy|không bấm|chưa xác nhận|vẫn còn/i.test(
+            row.error,
+          )
+        ) {
+          setError(row.error);
+          setMsg("");
+          break;
+        }
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Không kết nối được máy chủ");
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
+  function toggleDeleteSelect(id: string, on: boolean) {
+    setSelectedDeleteIds((prev) => {
+      if (on) return prev.includes(id) ? prev : [...prev, id];
+      return prev.filter((x) => x !== id);
+    });
+  }
+
+  function toggleSelectAllDeletable(on: boolean) {
+    if (!on) {
+      setSelectedDeleteIds([]);
+      return;
+    }
+    setSelectedDeleteIds(deletableAssignments.map((a) => a.id));
+  }
+
+  async function deleteSelectedReviews() {
+    const ids = selectedDeleteIds.filter((id) =>
+      deletableAssignments.some((a) => a.id === id),
+    );
+    if (!ids.length) return;
+    if (
+      !window.confirm(
+        `Xóa ${ids.length} bình luận đã chọn trên Google Maps?\n\n• Xóa thật trên Maps\n• Giữ dòng kế hoạch → Đã xóa\n• Chạy lần lượt theo từng mail (có thể mất vài phút)`,
+      )
+    ) {
+      return;
+    }
+    setError("");
+    setMsg(`Đang enqueue xóa ${ids.length} bài…`);
+    setBulkDeleteBusy(true);
+    setPlan((prev) => {
+      if (!prev) return prev;
+      const set = new Set(ids);
+      return {
+        ...prev,
+        assignments: prev.assignments.map((a) =>
+          set.has(a.id) ? { ...a, error: "Đang xóa trên Maps…" } : a,
+        ),
+      };
+    });
+
+    let queued = 0;
+    const enqueueErrors: string[] = [];
+    try {
+      // Enqueue tuần tự — tránh đụng profile đang busy
+      for (const assignmentId of ids) {
+        try {
+          const res = await fetch(
+            `/api/projects/${projectId}/review-plan/assignments/${assignmentId}/delete-review`,
+            { method: "POST" },
+          );
+          const data = await readApiJson<{
+            error?: string;
+            plan?: Plan;
+            alreadyDeleted?: boolean;
+          }>(res);
+          if (!res.ok) {
+            enqueueErrors.push(data.error || assignmentId);
+            continue;
+          }
+          if (data.plan) setPlan(data.plan);
+          queued += 1;
+        } catch (e) {
+          enqueueErrors.push(e instanceof Error ? e.message : String(e));
+        }
+        await new Promise((r) => setTimeout(r, 400));
+      }
+
+      setSelectedDeleteIds([]);
+      setMsg(
+        enqueueErrors.length
+          ? `Đã enqueue ${queued}/${ids.length} — lỗi: ${enqueueErrors[0]}`
+          : `Đã enqueue ${queued} bài — đang xóa trên Maps…`,
+      );
+
+      const pending = new Set(ids);
+      const deadline = Date.now() + Math.max(5, ids.length) * 4 * 60_000;
+      while (pending.size > 0 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 3000));
+        await load({ light: true });
+        const checkRes = await fetch(
+          `/api/projects/${projectId}/review-plan?light=1`,
+        );
+        if (!checkRes.ok) continue;
+        const checkData = await readApiJson<{
+          plan?: {
+            assignments?: Array<{
+              id: string;
+              status: string;
+              error: string | null;
+            }>;
+          } | null;
+        }>(checkRes);
+        const rows = checkData.plan?.assignments || [];
+        for (const id of [...pending]) {
+          const row = rows.find((a) => a.id === id);
+          if (!row) {
+            pending.delete(id);
+            continue;
+          }
+          if (isMapsDeletedAssignment(row)) {
+            pending.delete(id);
+            continue;
+          }
+          if (
+            row.error &&
+            !/Đang xóa trên Maps/i.test(row.error) &&
+            /xóa thất bại|không xóa|không tìm thấy|không thấy|không bấm/i.test(
+              row.error,
+            )
+          ) {
+            pending.delete(id);
+          }
+        }
+        setMsg(
+          pending.size
+            ? `Đang xóa… còn ${pending.size}/${ids.length}`
+            : `Xong xóa hàng loạt (${ids.length} bài)`,
+        );
+      }
+      await load();
+      if (pending.size > 0) {
+        setError(`Còn ${pending.size} bài chưa xong — xem cột Status / lỗi trong bảng`);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Không kết nối được máy chủ");
+    } finally {
+      setBulkDeleteBusy(false);
+      setDeletingId(null);
+    }
+  }
+
   async function verifyAllCompleted() {
     setError("");
     setMsg("");
@@ -811,9 +1070,29 @@ export function ReviewPlanPanel({
     : 0;
 
   const failedAssignments =
-    plan?.assignments.filter((a) => a.status === "FAILED" || a.status === "SKIPPED") ?? [];
+    plan?.assignments.filter(
+      (a) =>
+        (a.status === "FAILED" || a.status === "SKIPPED") &&
+        !isMapsDeletedAssignment(a),
+    ) ?? [];
   const completedAssignments =
-    plan?.assignments.filter((a) => a.status === "COMPLETED") ?? [];
+    plan?.assignments.filter(
+      (a) => a.status === "COMPLETED" && !isMapsDeletedAssignment(a),
+    ) ?? [];
+  const deletedAssignments =
+    plan?.assignments.filter((a) => isMapsDeletedAssignment(a)) ?? [];
+  const deletableAssignments = completedAssignments.filter(
+    (a) => !!a.apmProfileId && !/Đang xóa trên Maps/i.test(a.error || ""),
+  );
+  const deletableIdsKey = deletableAssignments.map((a) => a.id).join(",");
+
+  useEffect(() => {
+    const allowed = new Set(deletableIdsKey ? deletableIdsKey.split(",") : []);
+    setSelectedDeleteIds((prev) => {
+      const next = prev.filter((id) => allowed.has(id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [deletableIdsKey]);
 
   return (
     <section className="panel space-y-4 p-5 sm:p-6">
@@ -855,26 +1134,46 @@ export function ReviewPlanPanel({
       )}
 
       {eligibleSnap && eligibleSnap.unassignedSlots > 0 && plan && (
-        <p className="text-xs text-[var(--warn-ink)]">
-          {eligibleSnap.unassignedSlots} bài chưa gán mail · {eligibleSnap.eligibleCount} mail khả dụng.{" "}
-          <button
-            type="button"
-            className="link-accent"
-            disabled={busy || eligibleSnap.eligibleCount === 0}
-            onClick={() => void fillEmptyProfiles()}
-          >
-            Tự gán
-          </button>
-          {" · "}
-          <button
-            type="button"
-            className="link-accent"
-            disabled={busy}
-            onClick={() => void loadEligible()}
-          >
-            Làm mới
-          </button>
-        </p>
+        <div className="space-y-1 text-xs text-[var(--warn-ink)]">
+          <p>
+            {eligibleSnap.unassignedSlots} bài chưa gán mail ·{" "}
+            {eligibleSnap.eligibleCount} mail khả dụng
+            {eligibleSnap.eligibleCount < eligibleSnap.unassignedSlots
+              ? " (thiếu mail → slot còn lại để trống, không xoay vòng)"
+              : ""}
+            .{" "}
+            <button
+              type="button"
+              className="link-accent"
+              disabled={busy || eligibleSnap.eligibleCount === 0}
+              onClick={() => void fillEmptyProfiles()}
+            >
+              Tự gán
+            </button>
+            {" · "}
+            <button
+              type="button"
+              className="link-accent"
+              disabled={busy}
+              onClick={() => void loadEligible()}
+            >
+              Làm mới
+            </button>
+          </p>
+          <p className="text-[var(--muted)]">
+            Mail READY: {eligibleSnap.readyTotalCount}
+            {eligibleSnap.assignedInPlanCount > 0
+              ? ` · đã gán trong kế hoạch: ${eligibleSnap.assignedInPlanCount}`
+              : ""}
+            {eligibleSnap.blockedAtPlaceCount > 0
+              ? ` · đã review địa điểm này: ${eligibleSnap.blockedAtPlaceCount}`
+              : ""}
+            {eligibleSnap.needsVerifyCount > 0
+              ? ` · cần Verify: ${eligibleSnap.needsVerifyCount}`
+              : ""}
+            {" · "}1 mail / 1 bài / 1 địa điểm
+          </p>
+        </div>
       )}
 
       {planMissingSchedule && (
@@ -937,7 +1236,7 @@ export function ReviewPlanPanel({
             <>
               <span
                 className={`badge ${autoDispatchPaused ? "badge-neutral text-[var(--warn-ink)]" : "badge-accent"}`}
-                title="Trạng thái enqueue tự động (mọi dự án)"
+                title="Trạng thái enqueue tự động (chỉ dự án này)"
               >
                 Tự động: {autoDispatchPaused ? "đã dừng" : "đang chạy"}
               </span>
@@ -947,7 +1246,7 @@ export function ReviewPlanPanel({
                     type="button"
                     className="btn btn-primary"
                     disabled={busy || autoDispatchBusy}
-                    title="Bật lại loop đăng theo lịch (30s/tick)"
+                    title="Bật lại loop đăng theo lịch cho dự án này"
                     onClick={() => void setAutoDispatchPausedState(false)}
                   >
                     {autoDispatchBusy ? "Đang…" : "Tiếp tục đăng tự động"}
@@ -957,7 +1256,7 @@ export function ReviewPlanPanel({
                     type="button"
                     className="btn btn-secondary"
                     disabled={busy || autoDispatchBusy}
-                    title="Dừng enqueue tự động — job đang chạy vẫn tiếp tục; vẫn đăng tay được"
+                    title="Dừng enqueue tự động cho dự án này — job đang chạy vẫn tiếp tục; vẫn đăng tay được"
                     onClick={() => void setAutoDispatchPausedState(true)}
                   >
                     {autoDispatchBusy ? "Đang…" : "Dừng đăng tự động"}
@@ -969,10 +1268,38 @@ export function ReviewPlanPanel({
             <button
               type="button"
               className="btn btn-secondary"
-              disabled={busy || verifyAllBusy || verifyingId !== null}
+              disabled={
+                busy ||
+                verifyAllBusy ||
+                verifyingId !== null ||
+                bulkDeleteBusy ||
+                deletingId !== null
+              }
               onClick={() => void verifyAllCompleted()}
             >
               {verifyAllBusy ? "Đang quét…" : `Quét ${completedAssignments.length} bài đã đăng`}
+            </button>
+          )}
+          {deletableAssignments.length > 0 && (
+            <button
+              type="button"
+              className="btn btn-secondary text-[var(--danger)]"
+              disabled={
+                busy ||
+                bulkDeleteBusy ||
+                verifyAllBusy ||
+                verifyingId !== null ||
+                deletingId !== null ||
+                selectedDeleteIds.length === 0
+              }
+              title="Xóa nhiều bài đã chọn trên Google Maps"
+              onClick={() => void deleteSelectedReviews()}
+            >
+              {bulkDeleteBusy
+                ? "Đang xóa nhiều…"
+                : selectedDeleteIds.length > 0
+                  ? `Xóa đã chọn (${selectedDeleteIds.length})`
+                  : "Xóa đã chọn"}
             </button>
           )}
         </div>
@@ -1068,9 +1395,30 @@ export function ReviewPlanPanel({
       {plan && plan.assignments.length > 0 && (
         <div className="space-y-2">
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[860px] text-left text-sm">
+            <table className="w-full min-w-[900px] text-left text-sm">
               <thead>
                 <tr className="border-b border-[var(--line)] font-mono text-xs uppercase tracking-[0.12em] text-[var(--muted)]">
+                  <th className="py-2 pr-2">
+                    {deletableAssignments.length > 0 ? (
+                      <input
+                        type="checkbox"
+                        className="align-middle"
+                        title="Chọn tất cả bài có thể xóa"
+                        checked={
+                          deletableAssignments.length > 0 &&
+                          deletableAssignments.every((a) =>
+                            selectedDeleteIds.includes(a.id),
+                          )
+                        }
+                        disabled={busy || bulkDeleteBusy || deletingId !== null}
+                        onChange={(e) =>
+                          toggleSelectAllDeletable(e.target.checked)
+                        }
+                      />
+                    ) : (
+                      <span className="sr-only">Chọn</span>
+                    )}
+                  </th>
                   <th className="py-2 pr-2">#</th>
                   <th className="py-2 pr-2">Ngày đăng</th>
                   <th className="py-2 pr-2">Sao</th>
@@ -1096,8 +1444,28 @@ export function ReviewPlanPanel({
                     !!a.apmProfileId &&
                     (plan.status === "READY" || plan.status === "RUNNING");
                   const isPosting = postingId === a.id;
+                  const canSelectDelete =
+                    a.status === "COMPLETED" &&
+                    !isMapsDeletedAssignment(a) &&
+                    !!a.apmProfileId &&
+                    !/Đang xóa trên Maps/i.test(a.error || "");
                   return (
                   <tr key={a.id} className="border-b border-[var(--line)] align-top">
+                    <td className="py-2 pr-2">
+                      {canSelectDelete ? (
+                        <input
+                          type="checkbox"
+                          className="align-middle"
+                          checked={selectedDeleteIds.includes(a.id)}
+                          disabled={busy || bulkDeleteBusy || deletingId !== null}
+                          onChange={(e) =>
+                            toggleDeleteSelect(a.id, e.target.checked)
+                          }
+                        />
+                      ) : (
+                        <span className="inline-block w-4" />
+                      )}
+                    </td>
                     <td className="py-2 pr-2">{a.sortOrder + 1}</td>
                     <td className="py-2 pr-2 text-xs whitespace-nowrap">
                       {a.status === "PENDING" || a.status === "FAILED" ? (
@@ -1190,9 +1558,16 @@ export function ReviewPlanPanel({
                     </td>
                     <td className="w-[160px] max-w-[160px] py-2 pr-2 align-top">
                       <span className="badge badge-neutral" title={a.status}>
-                        {assignmentStatusLabel(a.status)}
+                        {assignmentStatusLabel(a.status, {
+                          error: a.error,
+                          reviewVisibility: a.reviewVisibility,
+                        })}
                       </span>
-                      {a.status === "COMPLETED" && a.reviewVisibility && (
+                      {isMapsDeletedAssignment(a) ? (
+                        <span className="mt-1 block badge badge-neutral text-[var(--danger)]">
+                          Đã xóa trên Maps
+                        </span>
+                      ) : a.status === "COMPLETED" && a.reviewVisibility ? (
                         <span
                           className={`mt-1 block ${reviewVisibilityBadgeClass(a.reviewVisibility)}`}
                           title={
@@ -1203,8 +1578,10 @@ export function ReviewPlanPanel({
                         >
                           {reviewVisibilityLabel(a.reviewVisibility)}
                         </span>
-                      )}
-                      {a.error && (
+                      ) : null}
+                      {a.error &&
+                        !isMapsDeletedAssignment(a) &&
+                        !/Đang xóa trên Maps/i.test(a.error) && (
                         <p
                           className="mt-1 line-clamp-2 text-xs leading-snug text-[var(--danger)]"
                           title={formatReviewError(a.error, 200)}
@@ -1234,15 +1611,71 @@ export function ReviewPlanPanel({
                       )}
                     </td>
                     <td className="py-2 pr-2">
-                      {a.status === "COMPLETED" ? (
-                        <button
-                          type="button"
-                          className="btn btn-sm btn-soft"
-                          disabled={busy || verifyAllBusy || verifyingId !== null}
-                          onClick={() => void verifyAssignment(a.id)}
-                        >
-                          {verifyingId === a.id ? "Đang…" : "Quét"}
-                        </button>
+                      {a.status === "COMPLETED" && !isMapsDeletedAssignment(a) ? (
+                        <div className="flex flex-col gap-1">
+                          <button
+                            type="button"
+                            className="btn btn-sm btn-soft"
+                            disabled={
+                              busy ||
+                              verifyAllBusy ||
+                              verifyingId !== null ||
+                              deletingId !== null ||
+                              bulkDeleteBusy
+                            }
+                            onClick={() => void verifyAssignment(a.id)}
+                          >
+                            {verifyingId === a.id ? "Đang…" : "Quét"}
+                          </button>
+                          {!/Đang xóa trên Maps/i.test(a.error || "") && (
+                              <button
+                                type="button"
+                                className="btn btn-sm btn-soft text-[var(--danger)]"
+                                disabled={
+                                  busy ||
+                                  verifyAllBusy ||
+                                  verifyingId !== null ||
+                                  deletingId !== null ||
+                                  bulkDeleteBusy ||
+                                  !a.apmProfileId
+                                }
+                                title="Xóa bài trên Google Maps bằng đúng mail đã đăng"
+                                onClick={() => void deleteAssignmentReview(a.id)}
+                              >
+                                {deletingId === a.id ? "Đang…" : "Xóa"}
+                              </button>
+                            )}
+                          {/Đang xóa trên Maps/i.test(a.error || "") && (
+                            <span className="text-xs text-[var(--warn-ink)]">
+                              Đang xóa…
+                            </span>
+                          )}
+                        </div>
+                      ) : isMapsDeletedAssignment(a) ? (
+                        <div className="flex flex-col gap-1">
+                          <span className="text-xs text-[var(--muted)]">Đã xóa</span>
+                          {a.apmProfileId && (
+                            <button
+                              type="button"
+                              className="btn btn-sm btn-soft text-[var(--danger)]"
+                              disabled={
+                                busy ||
+                                verifyAllBusy ||
+                                verifyingId !== null ||
+                                deletingId !== null ||
+                                bulkDeleteBusy
+                              }
+                              title="Nếu bài vẫn còn trên Maps — chạy xóa lại (có xác nhận)"
+                              onClick={() =>
+                                void deleteAssignmentReview(a.id, {
+                                  forceRetry: true,
+                                })
+                              }
+                            >
+                              {deletingId === a.id ? "Đang…" : "Xóa lại"}
+                            </button>
+                          )}
+                        </div>
                       ) : (
                         <span className="text-[var(--muted)]">—</span>
                       )}

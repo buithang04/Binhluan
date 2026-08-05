@@ -178,6 +178,22 @@ export class InternalService {
       }
     }
 
+    if (jobRun.taskCode === "MAPS_DELETE_REVIEW") {
+      const payload = (jobRun.payload ?? {}) as { assignmentId?: string };
+      if (payload.assignmentId) {
+        await this.prisma.reviewAssignment
+          .update({
+            where: { id: payload.assignmentId },
+            data: {
+              // Giữ COMPLETED — chỉ báo đang xóa
+              apmJobRunId: jobRun.id,
+              error: "Đang xóa trên Maps…",
+            },
+          })
+          .catch(() => undefined);
+      }
+    }
+
     const jobProxy = jobRun.proxy;
 
     return {
@@ -281,7 +297,8 @@ export class InternalService {
     const skipCooldown =
       job?.taskCode === "BROWSER_CHECK" ||
       job?.taskCode === "LOGIN" ||
-      job?.taskCode === "MAPS_REVIEW";
+      job?.taskCode === "MAPS_REVIEW" ||
+      job?.taskCode === "MAPS_DELETE_REVIEW";
     const nextRun = skipCooldown
       ? now
       : new Date(now.getTime() + profile.cooldownMinutes * 60_000);
@@ -294,7 +311,11 @@ export class InternalService {
 
     // LOGIN OK → READY. Giữ READY nếu browserEvent/late-ready đã set trước complete
     // (tránh race: ready xong CDP disconnect → complete ghi đè UNREADY).
-    const profileStatus = markReady || alreadyReady ? "READY" : "UNREADY";
+    // MAPS_DELETE_REVIEW cố ý tắt Chrome — luôn giữ READY để không phá đăng bài sau.
+    const profileStatus =
+      markReady || alreadyReady || job?.taskCode === "MAPS_DELETE_REVIEW"
+        ? "READY"
+        : "UNREADY";
 
     await this.prisma.$transaction(async (tx) => {
       await tx.profile.update({
@@ -375,7 +396,9 @@ export class InternalService {
           !/gstatic\.com|\/_\/mss\/|boq-one-google|\.(css|js)(\?|$)/i.test(
             reviewLinkRaw,
           ) &&
-          /maps\/reviews|\/maps\/contrib|local\/reviews|review\/data|maps\.app\.goo\.gl|goo\.gl\/maps/i.test(
+          !(/\/maps\/contrib\/\d+\/reviews\/?(\?|$)/i.test(reviewLinkRaw) &&
+            !/!1s|cid=|place/i.test(reviewLinkRaw)) &&
+          /maps\/reviews|\/maps\/contrib\/\d+.+|local\/reviews|review\/data|maps\.app\.goo\.gl|goo\.gl\/maps/i.test(
             reviewLinkRaw,
           );
         const reviewLink = looksLikeMapsReview
@@ -446,9 +469,73 @@ export class InternalService {
           }
         }
       }
+
+      if (job?.taskCode === "MAPS_DELETE_REVIEW") {
+        const payload = (job.payload ?? {}) as { assignmentId?: string };
+        const assignmentId = payload.assignmentId;
+        const deletedOk =
+          input.result?.ok === true ||
+          input.result?.alreadyGone === true ||
+          input.result?.deleted === true;
+        if (assignmentId && deletedOk) {
+          try {
+            const ctx = await loadAssignmentPlaceContext(
+              this.prisma,
+              assignmentId,
+            );
+            // Đánh dấu sổ cái DELETED — mail được đăng lại place (không chặn)
+            if (ctx?.assignment.apmProfileId && ctx.placeKey) {
+              await upsertProfilePlaceReviewTx(tx, {
+                profileId: ctx.assignment.apmProfileId,
+                accountEmail: ctx.assignment.profileEmail ?? "",
+                placeKey: ctx.placeKey,
+                placeName: ctx.project.brandName,
+                googleMapsUrl: ctx.project.googleMapsUrl,
+                resolvedUrl: ctx.project.resolvedUrl,
+                stars: ctx.assignment.stars,
+                reviewText: ctx.assignment.reviewText,
+                reviewLink: ctx.assignment.reviewLink,
+                assignmentId,
+                projectId: ctx.project.id,
+                source: "POSTED",
+                visibility: "DELETED",
+              });
+            }
+          } catch (ledgerErr) {
+            console.warn(
+              "[internal] delete ledger mark failed:",
+              ledgerErr instanceof Error ? ledgerErr.message : ledgerErr,
+            );
+          }
+          // Giữ dòng trong kế hoạch — báo đã xóa
+          await tx.reviewAssignment.update({
+            where: { id: assignmentId },
+            data: {
+              status: "SKIPPED",
+              error: "Đã xóa trên Maps",
+              apmJobRunId: input.jobRunId,
+            },
+          });
+        } else if (assignmentId) {
+          const detail =
+            typeof input.result?.detail === "string"
+              ? input.result.detail
+              : "Xóa review thất bại";
+          await tx.reviewAssignment.update({
+            where: { id: assignmentId },
+            data: {
+              error: `Xóa thất bại: ${detail}`.slice(0, 2000),
+              apmJobRunId: input.jobRunId,
+            },
+          });
+        }
+      }
     });
 
-    await this.releaseJobProxy(job, { applyCooldown: true });
+    // DELETE không dùng proxy — không cooldown proxy
+    await this.releaseJobProxy(job, {
+      applyCooldown: job?.taskCode !== "MAPS_DELETE_REVIEW",
+    });
 
     return { ok: true, nextRun, browserIndex: profile.browserIndex, browserAlive, markReady, status: profileStatus };
   }
@@ -473,10 +560,26 @@ export class InternalService {
     const durationMs = job?.startedAt ? now.getTime() - job.startedAt.getTime() : null;
     const nextRun = new Date(now.getTime() + profile.cooldownMinutes * 60_000);
     const browserAlive = input.browserAlive === true;
+    /** Lỗi Chrome/CDP tạm — không phải mất session login → giữ READY + cho đăng lại. */
+    const chromeTransient =
+      /Start-Process Chrome failed|Chrome executable not found|devtools|waitForDevTools|ECONNREFUSED|spawn.*chrome|cmd-fallback|Connection closed|Target closed|Session closed|Protocol error|WebSocket is not open|Navigating frame was detached|Execution context was destroyed|browser has disconnected|Browser\.disconnected|net::ERR_|timeout.*chrome|Chrome kẹt|launch conflict/i.test(
+        input.error,
+      );
     const keepReady =
-      job?.taskCode === "MAPS_REVIEW" &&
-      browserAlive &&
-      (profile.status === "READY" || profile.status === "RUNNING" || profile.status === "QUEUED");
+      !input.disableProfile &&
+      ((job?.taskCode === "MAPS_REVIEW" &&
+        browserAlive &&
+        (profile.status === "READY" ||
+          profile.status === "RUNNING" ||
+          profile.status === "QUEUED")) ||
+        (job?.taskCode === "MAPS_REVIEW" && chromeTransient) ||
+        // DELETE cố ý tắt Chrome — account vẫn READY để đăng bài sau
+        (job?.taskCode === "MAPS_DELETE_REVIEW" &&
+          (profile.status === "READY" ||
+            profile.status === "RUNNING" ||
+            profile.status === "QUEUED" ||
+            chromeTransient)) ||
+        (job?.taskCode === "LOGIN" && chromeTransient && profile.status === "READY"));
 
     await this.prisma.$transaction(async (tx) => {
       await tx.profile.update({
@@ -488,7 +591,7 @@ export class InternalService {
           leaseToken: null,
           leaseUntil: null,
           currentTask: null,
-          browserAlive,
+          browserAlive: keepReady ? browserAlive : browserAlive,
           browserWorkerId: browserAlive ? input.workerId ?? null : null,
           ...(job?.taskCode === "MAPS_REVIEW" ? { proxyId: null } : {}),
         },
@@ -514,17 +617,23 @@ export class InternalService {
       if (job?.taskCode === "MAPS_REVIEW") {
         const payload = (job.payload ?? {}) as { assignmentId?: string };
         if (payload.assignmentId) {
-          const transientChrome =
-            /devtools|reconnect|không reconnect|chờ job trước|chờ Chrome|Chrome kẹt|launch conflict|treo quá/i.test(
-              input.error,
-            );
+          const transientChrome = chromeTransient;
           await tx.reviewAssignment.update({
             where: { id: payload.assignmentId },
-            data: {
-              status: transientChrome ? "PENDING" : "FAILED",
-              error: input.error.slice(0, 2000),
-              apmJobRunId: input.jobRunId,
-            },
+            data: transientChrome
+              ? {
+                  status: "PENDING",
+                  // Giữ lỗi ngắn để UI biết; tick sau sẽ đăng lại (đừng FAILED)
+                  error: `Tạm lỗi Chrome — sẽ tự thử lại: ${input.error}`.slice(0, 2000),
+                  apmJobRunId: null,
+                  // Đưa lại vào cửa sổ lịch nếu vừa bị Connection closed
+                  scheduledAt: now,
+                }
+              : {
+                  status: "FAILED",
+                  error: input.error.slice(0, 2000),
+                  apmJobRunId: input.jobRunId,
+                },
           });
           if (/ALREADY_REVIEWED_AT_PLACE/i.test(input.error)) {
             try {
@@ -575,6 +684,20 @@ export class InternalService {
               });
             }
           }
+        }
+      }
+
+      if (job?.taskCode === "MAPS_DELETE_REVIEW") {
+        const payload = (job.payload ?? {}) as { assignmentId?: string };
+        if (payload.assignmentId) {
+          await tx.reviewAssignment.update({
+            where: { id: payload.assignmentId },
+            data: {
+              // Giữ COMPLETED — báo lỗi xóa
+              error: `Xóa thất bại: ${input.error}`.slice(0, 2000),
+              apmJobRunId: input.jobRunId,
+            },
+          });
         }
       }
     });

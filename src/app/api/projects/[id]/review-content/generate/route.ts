@@ -14,12 +14,6 @@ type Ctx = { params: Promise<{ id: string }> };
 /** Chặn double-click: cùng project không chạy 2 generate song song. */
 const generatingIds = new Set<string>();
 
-function isRealGeneratedAt(value: Date | null | undefined): boolean {
-  if (!value) return false;
-  // Sentinel epoch (bug cũ) không tính là đã sinh
-  return value.getTime() > 0;
-}
-
 export async function POST(_req: Request, ctx: Ctx) {
   const session = await getServerSession(authOptions);
   if (!session?.user?.id) {
@@ -34,13 +28,6 @@ export async function POST(_req: Request, ctx: Ctx) {
   });
   if (!project) {
     return NextResponse.json({ error: "Không tìm thấy dự án" }, { status: 404 });
-  }
-
-  if (isRealGeneratedAt(project.reviewContentGeneratedAt)) {
-    return NextResponse.json(
-      { error: "Dự án đã sinh nội dung review — mỗi dự án chỉ sinh 1 lần" },
-      { status: 400 },
-    );
   }
 
   // Dọn sentinel epoch nếu còn sót

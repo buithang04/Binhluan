@@ -166,7 +166,7 @@ export const DEFAULT_DEEPSEEK_PROMPT_JSON = `{
     },
     {
       "role": "user",
-      "content": "Thương hiệu: {{ $json.project.brand_name }}\\nWebsite: {{ $json.project.website }}\\nMô tả: {{ $json.project.brand_description }}\\nKhách hàng mục tiêu: {{ $json.project.target_audience }}\\nThị trường: {{ $json.project.target_market }}\\nSản phẩm:\\n{{ $json.project.product_list }}\\n\\nĐịnh hướng: {{ $json.settings.content_direction }}\\nSố từ mục tiêu: {{ $json.settings.content_word_count }}\\nVí dụ tham khảo:\\n{{ $json.settings.content_example }}\\n\\nViết 1 bình luận review Google Maps duy nhất."
+      "content": "Thương hiệu: {{ $json.project.brand_name }}\\nWebsite: {{ $json.project.website }}\\nMô tả: {{ $json.project.brand_description }}\\nKhách hàng mục tiêu: {{ $json.project.target_audience }}\\nThị trường: {{ $json.project.target_market }}\\nSản phẩm:\\n{{ $json.project.product_list }}\\n\\nĐịnh hướng: {{ $json.settings.content_direction }}\\nSố từ mục tiêu: {{ $json.settings.content_word_count }}\\nReview facts:\\n{{ $json.settings.review_facts }}\\n\\nViết 1 bình luận review Google Maps duy nhất."
     }
   ]
 }`;
@@ -188,7 +188,7 @@ export const DEFAULT_STAR_SPIN_PROMPT_JSON = `{
     },
     {
       "role": "user",
-      "content": "Thương hiệu: {{ $json.project.brand_name }}\\nWebsite: {{ $json.project.website }}\\nMô tả: {{ $json.project.brand_description }}\\nKhách hàng: {{ $json.project.target_audience }}\\nThị trường: {{ $json.project.target_market }}\\nSản phẩm:\\n{{ $json.project.product_list }}\\n\\nĐịnh hướng: {{ $json.settings.content_direction }}\\nVí dụ: {{ $json.settings.content_example }}\\nSố từ khi resolve: {{ $json.settings.content_word_count }}\\n\\nSinh {{ $json.settings.star_levels_count }} template spin (mỗi mức sao 1 template) cho các mức: {{ $json.settings.star_levels }}. Dùng {a|b|c} cho mở đầu, nội dung, kết. Nhắc địa điểm tự nhiên."
+      "content": "Thương hiệu: {{ $json.project.brand_name }}\\nWebsite: {{ $json.project.website }}\\nMô tả: {{ $json.project.brand_description }}\\nKhách hàng: {{ $json.project.target_audience }}\\nThị trường: {{ $json.project.target_market }}\\nSản phẩm:\\n{{ $json.project.product_list }}\\n\\nĐịnh hướng: {{ $json.settings.content_direction }}\\nReview facts: {{ $json.settings.review_facts }}\\nSố từ khi resolve: {{ $json.settings.content_word_count }}\\n\\nSinh {{ $json.settings.star_levels_count }} template spin (mỗi mức sao 1 template) cho các mức: {{ $json.settings.star_levels }}. Dùng {a|b|c} cho mở đầu, nội dung, kết. Nhắc địa điểm tự nhiên."
     }
   ]
 }`;
@@ -217,11 +217,11 @@ export const PROMPT_VARIABLE_GROUPS: {
     items: [
       { path: "$json.settings.content_direction", label: "Định hướng nội dung" },
       { path: "$json.settings.content_language", label: "Ngôn ngữ" },
-      { path: "$json.settings.content_example", label: "Ví dụ tham khảo" },
+      { path: "$json.settings.review_facts", label: "Các bình luận thật (mẫu)" },
       { path: "$json.settings.content_word_count", label: "Số từ" },
       { path: "$json.settings.star_levels", label: "Các mức sao (batch)" },
       { path: "$json.settings.star_levels_count", label: "Số mức sao" },
-      { path: "$json.settings.star_guide", label: "Hướng dẫn giọng theo sao" },
+      { path: "$json.settings.star_guide", label: "Hướng dẫn giọng theo sao (tự sinh theo mức sao)" },
       { path: "$json.settings.stars", label: "1 mức sao (legacy)" },
       { path: "$json.settings.star_label", label: "Nhãn 1 mức sao (legacy)" },
     ],
@@ -290,6 +290,15 @@ const STAR_LABELS_FOR_PROMPT: Record<number, string> = {
   1: "tiêu cực, cần cải thiện rõ ràng",
 };
 
+/** Quy đổi số từ trước khi đưa vào prompt: floor(n/3) * 2 */
+function normalizePromptWordCount(
+  wordCount?: number | null,
+): string {
+  if (wordCount == null || !Number.isFinite(wordCount)) return "";
+  const n = Math.max(0, Math.floor(wordCount));
+  return String(Math.floor(n / 3) * 2);
+}
+
 export function buildPromptContext(
   project: {
     brandName: string;
@@ -349,9 +358,11 @@ export function buildPromptContext(
     settings: {
       content_direction: project.contentDirection || "",
       content_language: project.contentLanguage === "EN" ? "English" : "Vietnamese",
+      review_facts: project.contentExample || "",
+      // Alias tương thích prompt cũ
+      real_review_samples: project.contentExample || "",
       content_example: project.contentExample || "",
-      content_word_count:
-        project.contentWordCount != null ? String(project.contentWordCount) : "",
+      content_word_count: normalizePromptWordCount(project.contentWordCount),
       stars: star != null ? String(star) : levelsForGuide[0] != null ? String(levelsForGuide[0]) : "",
       star_label:
         star != null

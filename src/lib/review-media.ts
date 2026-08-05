@@ -68,3 +68,48 @@ export function summarizeImageCounts(counts: number[]) {
   }
   return tally;
 }
+
+/**
+ * Phân bổ ảnh cho nhiều bình luận trong cùng plan:
+ * - 1–2 ảnh / bình luận
+ * - Ưu tiên bình luận 5★ có 2 ảnh
+ * - Ảnh là duy nhất giữa các bình luận (không trùng id)
+ */
+export function allocateUniqueMediaForPlan<T extends { id: string }>(
+  slots: Array<{ stars: number }>,
+  media: T[],
+): T[][] {
+  if (!slots.length || !media.length) return slots.map(() => []);
+
+  const shuffled = [...media];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j]!, shuffled[i]!];
+  }
+
+  const out: T[][] = Array.from({ length: slots.length }, () => []);
+  let cursor = 0;
+
+  // Pass 1: cố gắng cho mỗi bình luận 1 ảnh (ưu tiên sao cao trước)
+  const byPriority = slots
+    .map((s, idx) => ({ idx, stars: s.stars }))
+    .sort((a, b) => b.stars - a.stars || a.idx - b.idx);
+  for (const item of byPriority) {
+    if (cursor >= shuffled.length) break;
+    out[item.idx]!.push(shuffled[cursor++]!);
+  }
+
+  // Pass 2: ảnh thứ 2 cho 5★ trước
+  for (const item of byPriority.filter((x) => x.stars >= 5)) {
+    if (cursor >= shuffled.length) break;
+    if (out[item.idx]!.length < 2) out[item.idx]!.push(shuffled[cursor++]!);
+  }
+
+  // Pass 3: ảnh thứ 2 cho sao còn lại (nếu còn ảnh), ưu tiên 4★ rồi xuống
+  for (const item of byPriority.filter((x) => x.stars < 5)) {
+    if (cursor >= shuffled.length) break;
+    if (out[item.idx]!.length < 2) out[item.idx]!.push(shuffled[cursor++]!);
+  }
+
+  return out;
+}

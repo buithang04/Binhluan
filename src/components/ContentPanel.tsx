@@ -42,6 +42,12 @@ export function ContentPanel({
   initialSpinByStar?: ReviewSpinByStar;
   initialGeneratedAt?: string | null;
 }) {
+  const countWords = (text: string) =>
+    text
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean).length;
+
   const [contentDirection, setContentDirection] = useState(
     initialSettings?.contentDirection || "",
   );
@@ -186,7 +192,6 @@ export function ContentPanel({
 
   // Tự lưu form khi sửa (không cần nút) — trước khi sinh nội dung
   useEffect(() => {
-    if (generatedAt) return;
     if (skipAutosaveRef.current) {
       skipAutosaveRef.current = false;
       return;
@@ -200,15 +205,10 @@ export function ContentPanel({
     contentLanguage,
     contentExample,
     contentWordCount,
-    generatedAt,
     saveContentSettings,
   ]);
 
   async function generateReviewContent() {
-    if (generatedAt) {
-      setError("Dự án đã sinh nội dung — mỗi dự án chỉ sinh 1 lần");
-      return;
-    }
     setError("");
     setMessage("");
     setLoading(true);
@@ -308,7 +308,7 @@ export function ContentPanel({
           Nội dung bình luận theo sao
         </h2>
         <p className="mt-1 text-xs text-[var(--muted)]">
-          Sinh template spin theo sao (DeepSeek, 1 lần/dự án). Có thể sửa sau khi sinh.
+          Sinh template spin theo sao (DeepSeek). Có thể bấm sinh lại khi cần.
         </p>
       </div>
 
@@ -336,7 +336,6 @@ export function ContentPanel({
             className="input min-h-[72px]"
             value={contentDirection}
             onChange={(e) => setContentDirection(e.target.value)}
-            disabled={!!generatedAt}
             placeholder="VD: tự nhiên, nhấn mạnh dịch vụ và không gian"
           />
         </label>
@@ -346,7 +345,6 @@ export function ContentPanel({
             className="input"
             value={contentLanguage}
             onChange={(e) => setContentLanguage(e.target.value as "VI" | "EN")}
-            disabled={!!generatedAt}
           >
             <option value="VI">Tiếng Việt</option>
             <option value="EN">English</option>
@@ -361,18 +359,16 @@ export function ContentPanel({
             max={2000}
             value={contentWordCount}
             onChange={(e) => setContentWordCount(e.target.value)}
-            disabled={!!generatedAt}
             placeholder="VD: 60 (để trống = mặc định)"
           />
           <p className="mt-1 text-xs text-[var(--muted)]">Tùy chọn — từ 10 đến 2000, để trống nếu không cần</p>
         </label>
         <label className="block space-y-1 text-sm sm:col-span-2">
-          <span className="font-medium text-[var(--ink-soft)]">Ví dụ tham khảo</span>
+          <span className="font-medium text-[var(--ink-soft)]">Các bình luận thật (mẫu)</span>
           <textarea
             className="input min-h-[72px]"
             value={contentExample}
             onChange={(e) => setContentExample(e.target.value)}
-            disabled={!!generatedAt}
           />
         </label>
       </div>
@@ -384,7 +380,7 @@ export function ContentPanel({
           <a href="/admin/deepseek" className="text-[var(--accent-ink)] underline">
             Admin → DeepSeek
           </a>
-          . Sinh nội dung gọi <strong>1 lần</strong> cho đủ các mức sao; schema ép{" "}
+          . Mỗi lần sinh sẽ ghi đè bộ template cũ theo các mức sao hiện tại; schema ép{" "}
           <code className="font-mono">{"{ templates: [{ stars, template }] }"}</code>.
         </p>
       </div>
@@ -393,23 +389,19 @@ export function ContentPanel({
         <button
           type="button"
           className="btn btn-primary"
-          disabled={loading || !!generatedAt || !starPlan || !neededStars.length}
+          disabled={loading || !starPlan || !neededStars.length}
           onClick={() => void generateReviewContent()}
         >
-          {loading
-            ? "Đang sinh…"
-            : generatedAt
-              ? "Đã sinh nội dung"
-              : `Sinh nội dung (${neededStars.length} mức · 1 call)`}
+          {loading ? "Đang sinh…" : `Sinh lại nội dung (${neededStars.length} mức · 1 call)`}
         </button>
-        {!generatedAt && savingSettings && (
+        {savingSettings && (
           <span className="text-xs text-[var(--muted)]">Đang lưu…</span>
         )}
       </div>
 
       {generatedAt && hydrated && (
         <p className="text-xs text-[var(--muted)]">
-          Sinh lúc {formatDateTimeVi(generatedAt)} — không thể sinh lại.
+          Lần sinh gần nhất: {formatDateTimeVi(generatedAt)}.
         </p>
       )}
 
@@ -493,10 +485,15 @@ export function ContentPanel({
                       </button>
                     </div>
                     {previewByStar[stars] && (
-                      <p className="rounded-[var(--radius-sm)] border border-[var(--line)] bg-[var(--surface-muted)] p-2 text-xs text-[var(--ink-soft)]">
-                        <span className="font-medium text-[var(--muted)]">Preview: </span>
-                        {previewByStar[stars]}
-                      </p>
+                      <div className="rounded-[var(--radius-sm)] border border-[var(--line)] bg-[var(--surface-muted)] p-2">
+                        <p className="text-xs text-[var(--ink-soft)]">
+                          <span className="font-medium text-[var(--muted)]">Preview: </span>
+                          {previewByStar[stars]}
+                        </p>
+                        <p className="mt-1 text-right text-[10px] text-[var(--muted)]">
+                          {countWords(previewByStar[stars])} từ
+                        </p>
+                      </div>
                     )}
                   </div>
                 ) : (
@@ -505,9 +502,14 @@ export function ContentPanel({
                       {spinByStar[stars]}
                     </pre>
                     {previewByStar[stars] && (
-                      <p className="mt-2 border-t border-[var(--line)] pt-2 text-xs text-[var(--muted)]">
-                        <span className="font-medium">Preview:</span> {previewByStar[stars]}
-                      </p>
+                      <div className="mt-2 border-t border-[var(--line)] pt-2">
+                        <p className="text-xs text-[var(--muted)]">
+                          <span className="font-medium">Preview:</span> {previewByStar[stars]}
+                        </p>
+                        <p className="mt-1 text-right text-[10px] text-[var(--muted)]">
+                          {countWords(previewByStar[stars])} từ
+                        </p>
+                      </div>
                     )}
                   </>
                 )

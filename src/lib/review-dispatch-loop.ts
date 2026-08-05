@@ -1,6 +1,9 @@
 import "server-only";
 
-import { isReviewAutoDispatchPaused } from "@/lib/review-dispatch-control";
+import {
+  getPausedProjectIds,
+  isProjectAutoDispatchPaused,
+} from "@/lib/review-dispatch-control";
 
 declare global {
   // eslint-disable-next-line no-var
@@ -10,6 +13,7 @@ declare global {
 /**
  * Auto-enqueue bài PENDING đang trong cửa sổ lịch đăng (không dump quá hạn).
  * FAILED / quá hạn → lập lại lịch hoặc Đăng tay. Mỗi tick: min(proxy, WORKER_CONCURRENCY) bài.
+ * Pause theo từng dự án — không dừng toàn hệ thống.
  */
 export function startReviewDispatchLoop() {
   if (process.env.DISABLE_REVIEW_DISPATCHER === "1") return;
@@ -22,7 +26,6 @@ export function startReviewDispatchLoop() {
 
   const tick = async () => {
     try {
-      if (await isReviewAutoDispatchPaused()) return;
       const { dispatchDueReviewAssignments } = await import("@/lib/review-dispatch");
       const result = await dispatchDueReviewAssignments();
       if (result.dispatched > 0) {
@@ -41,12 +44,14 @@ export function startReviewDispatchLoop() {
   // Tự đăng tiếp các bài đang chờ login xong (account chuyển READY) — không cần bấm lại.
   const loginTick = async () => {
     try {
-      if (await isReviewAutoDispatchPaused()) return;
       const { drainLoginWaits } = await import("@/lib/review-login-wait");
       const waits = drainLoginWaits();
       if (waits.length === 0) return;
+      const paused = await getPausedProjectIds();
       const { dispatchDueReviewAssignments } = await import("@/lib/review-dispatch");
       for (const w of waits) {
+        if (w.projectId && paused.has(w.projectId)) continue;
+        if (w.projectId && (await isProjectAutoDispatchPaused(w.projectId))) continue;
         const result = await dispatchDueReviewAssignments({
           assignmentId: w.assignmentId,
           projectId: w.projectId,
@@ -66,13 +71,14 @@ export function startReviewDispatchLoop() {
   // Chờ proxy — poll nhanh (5s) để đăng ngay khi lock/cooldown hết.
   const proxyTick = async () => {
     try {
-      if (await isReviewAutoDispatchPaused()) return;
       const { drainProxyWaits, hasProxyWaits } = await import("@/lib/review-proxy-wait");
       if (!hasProxyWaits()) return;
+      const paused = await getPausedProjectIds();
       const { dispatchDueReviewAssignments } = await import("@/lib/review-dispatch");
       const waits = drainProxyWaits();
       const doneKeys = new Set<string>();
       for (const w of waits) {
+        if (w.projectId && paused.has(w.projectId)) continue;
         const key = w.assignmentId ?? w.projectId ?? "__global__";
         if (doneKeys.has(key)) continue;
         doneKeys.add(key);

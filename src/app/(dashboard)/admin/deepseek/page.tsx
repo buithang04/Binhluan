@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   DEFAULT_STAR_SPIN_PROMPT_JSON,
+  PROMPT_VARIABLE_GROUPS,
   validatePromptJsonText,
 } from "@/lib/prompt-template";
 import { STAR_SPIN_OUTPUT_SCHEMA } from "@/lib/deepseek-schema";
@@ -145,6 +146,20 @@ export default function AdminDeepSeekPage() {
     }
   }
 
+  function variableSource(path: string): "Tự sinh" | "Nhập tay" {
+    if (
+      path === "$json.settings.star_guide" ||
+      path === "$json.settings.star_levels" ||
+      path === "$json.settings.star_levels_count" ||
+      path === "$json.settings.stars" ||
+      path === "$json.settings.star_label" ||
+      path === "$json.spin.resolved_text"
+    ) {
+      return "Tự sinh";
+    }
+    return "Nhập tay";
+  }
+
   return (
     <div className="space-y-6">
       <h1 className="page-title">DeepSeek</h1>
@@ -221,6 +236,41 @@ export default function AdminDeepSeekPage() {
             {promptError && (
               <p className="text-xs text-[var(--danger)]">{promptError}</p>
             )}
+          </div>
+
+          <div className="rounded-[var(--radius-sm)] border border-[var(--line)] bg-[var(--surface-muted)] p-3">
+            <p className="text-sm font-medium text-[var(--ink)]">Khung dữ liệu đầu vào prompt</p>
+            <p className="mt-1 text-xs text-[var(--muted)]">
+              Danh sách tất cả trường có thể gọi trong prompt JSON.
+            </p>
+            <div className="mt-3 overflow-x-auto">
+              <table className="w-full min-w-[560px] text-left text-sm">
+                <thead>
+                  <tr className="border-b border-[var(--line)] text-xs uppercase tracking-[0.12em] text-[var(--muted)]">
+                    <th className="py-2 pr-3">Cách gọi</th>
+                    <th className="py-2 pr-3">Tên cột (lúc nhập dữ liệu)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {PROMPT_VARIABLE_GROUPS.map((group) => (
+                    group.items.map((item, idx) => (
+                      <tr key={`${group.label}-${item.path}`} className="border-b border-[var(--line)]/60 align-top">
+                        <td className="py-2 pr-3 font-mono text-xs text-[var(--ink-soft)]">
+                          <span className="font-sans">{`{{ ${item.path} }}`}</span>
+                        </td>
+                        <td className="py-2 pr-3 text-xs text-[var(--ink-soft)]">
+                          {item.label}
+                          {idx === 0 ? ` (${group.label})` : ""}
+                          <span className="ml-2 text-[11px] text-[var(--muted)]">
+                            · {variableSource(item.path)}
+                          </span>
+                        </td>
+                      </tr>
+                    ))
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
 
           <div className="flex flex-wrap gap-2">

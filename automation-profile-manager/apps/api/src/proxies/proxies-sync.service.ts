@@ -1,10 +1,11 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import { ProxiesService, WebshareThrottledError } from "./proxies.service";
 
-export type WebshareSyncState = {
+export type ProxySyncState = {
+  provider: "homeproxy" | "webshare" | "none";
   enabled: boolean;
   intervalSec: number;
-  mode: "direct" | "backbone";
+  mode: string;
   running: boolean;
   cooldownUntil: string | null;
   lastStartedAt: string | null;
@@ -14,8 +15,12 @@ export type WebshareSyncState = {
     imported: number;
     updated: number;
     skipped: number;
+    disabled?: number;
   } | null;
 };
+
+/** @deprecated alias */
+export type WebshareSyncState = ProxySyncState;
 
 @Injectable()
 export class ProxiesSyncService implements OnModuleInit, OnModuleDestroy {
@@ -27,25 +32,24 @@ export class ProxiesSyncService implements OnModuleInit, OnModuleDestroy {
   private lastStartedAt: Date | null = null;
   private lastFinishedAt: Date | null = null;
   private lastError: string | null = null;
-  private lastResult: WebshareSyncState["lastResult"] = null;
+  private lastResult: ProxySyncState["lastResult"] = null;
 
   constructor(private readonly proxies: ProxiesService) {}
 
   onModuleInit() {
-    if (!this.isEnabled()) {
-      this.logger.log("Webshare auto-sync disabled");
+    const provider = this.provider();
+    if (provider === "none") {
+      this.logger.log("Proxy auto-sync disabled (no HomeProxy/Webshare token)");
       return;
     }
-    if (!process.env.WEBSHARE_API_TOKEN?.trim()) {
-      this.logger.warn(
-        "Webshare auto-sync bật nhưng thiếu WEBSHARE_API_TOKEN — bỏ qua",
-      );
+    if (!this.isEnabled()) {
+      this.logger.log(`${provider} auto-sync disabled`);
       return;
     }
 
     const intervalMs = this.intervalSec() * 1000;
     this.logger.log(
-      `Webshare auto-sync every ${this.intervalSec()}s (mode=${this.mode()})`,
+      `${provider} auto-sync every ${this.intervalSec()}s`,
     );
 
     void this.tick();
@@ -59,18 +63,26 @@ export class ProxiesSyncService implements OnModuleInit, OnModuleDestroy {
     this.timer = null;
   }
 
-  getStatus(): WebshareSyncState & {
+  getStatus(): ProxySyncState & {
     hasApiToken: boolean;
     apiTokenHint: string | null;
     apiBaseUrl: string;
+    merchantIdHint?: string | null;
   } {
-    const token = (process.env.WEBSHARE_API_TOKEN || "").trim();
+    const provider = this.provider();
+    const token =
+      provider === "homeproxy"
+        ? (process.env.HOMEPROXY_API_TOKEN || "").trim()
+        : (process.env.WEBSHARE_API_TOKEN || "").trim();
     const hint =
       token.length >= 4 ? `…${token.slice(-4)}` : token ? "…***" : null;
+    const merchantId = (process.env.HOMEPROXY_MERCHANT_ID || "").trim();
+
     return {
-      enabled: this.isEnabled() && !!token,
+      provider,
+      enabled: this.isEnabled() && !!token && provider !== "none",
       intervalSec: this.intervalSec(),
-      mode: this.mode(),
+      mode: provider === "webshare" ? this.webshareMode() : "static",
       running: this.running,
       cooldownUntil: this.cooldownUntil?.toISOString() ?? null,
       lastStartedAt: this.lastStartedAt?.toISOString() ?? null,
@@ -80,23 +92,48 @@ export class ProxiesSyncService implements OnModuleInit, OnModuleDestroy {
       hasApiToken: Boolean(token),
       apiTokenHint: hint,
       apiBaseUrl:
-        (process.env.WEBSHARE_API_BASE || "").trim() ||
-        "https://proxy.webshare.io/api/v2/proxy/list/",
+        provider === "homeproxy"
+          ? (process.env.HOMEPROXY_API_BASE || "").trim() ||
+            "https://api.homeproxy.vn/api/v1/users/proxies"
+          : (process.env.WEBSHARE_API_BASE || "").trim() ||
+            "https://proxy.webshare.io/api/v2/proxy/list/",
+      merchantIdHint: merchantId
+        ? `${merchantId.slice(0, 8)}…`
+        : null,
     };
   }
 
-  private isEnabled() {
-    const raw = (process.env.WEBSHARE_SYNC_ENABLED ?? "true").toLowerCase();
-    return raw !== "false" && raw !== "0" && raw !== "off";
+  /** Ưu tiên HomeProxy khi có token. */
+  private provider(): "homeproxy" | "webshare" | "none" {
+    if ((process.env.HOMEPROXY_API_TOKEN || "").trim()) return "homeproxy";
+    if ((process.env.WEBSHARE_API_TOKEN || "").trim()) return "webshare";
+    return "none";
   }
 
-  /** Webshare free API dễ bị 429 nếu < ~60s — mặc định 60. */
+  private isEnabled() {
+    const provider = this.provider();
+    if (provider === "homeproxy") {
+      const raw = (process.env.HOMEPROXY_SYNC_ENABLED ?? "true").toLowerCase();
+      return raw !== "false" && raw !== "0" && raw !== "off";
+    }
+    if (provider === "webshare") {
+      const raw = (process.env.WEBSHARE_SYNC_ENABLED ?? "true").toLowerCase();
+      return raw !== "false" && raw !== "0" && raw !== "off";
+    }
+    return false;
+  }
+
   private intervalSec() {
-    const n = Number(process.env.WEBSHARE_SYNC_INTERVAL_SEC || 60);
+    const provider = this.provider();
+    const raw =
+      provider === "homeproxy"
+        ? process.env.HOMEPROXY_SYNC_INTERVAL_SEC || 120
+        : process.env.WEBSHARE_SYNC_INTERVAL_SEC || 60;
+    const n = Number(raw);
     return Number.isFinite(n) && n >= 15 ? Math.floor(n) : 60;
   }
 
-  private mode(): "direct" | "backbone" {
+  private webshareMode(): "direct" | "backbone" {
     return process.env.WEBSHARE_SYNC_MODE === "backbone" ? "backbone" : "direct";
   }
 
@@ -106,24 +143,46 @@ export class ProxiesSyncService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    const provider = this.provider();
+    if (provider === "none" || !this.isEnabled()) return;
+
     this.running = true;
     this.lastStartedAt = new Date();
     try {
-      const result = await this.proxies.importFromWebshare({
-        mode: this.mode(),
-        onlyValid: false,
-      });
-      this.lastResult = {
-        imported: result.imported,
-        updated: result.updated,
-        skipped: result.skipped,
-      };
-      this.lastError = null;
-      this.cooldownUntil = null;
-      this.lastFinishedAt = new Date();
-      this.logger.log(
-        `Webshare sync ok +${result.imported} ~${result.updated} skip=${result.skipped}`,
-      );
+      if (provider === "homeproxy") {
+        const result = await this.proxies.importFromHomeProxy({
+          onlyStatic: true,
+          disableOthers: true,
+        });
+        this.lastResult = {
+          imported: result.imported,
+          updated: result.updated,
+          skipped: result.skipped,
+          disabled: result.disabled,
+        };
+        this.lastError = null;
+        this.cooldownUntil = null;
+        this.lastFinishedAt = new Date();
+        this.logger.log(
+          `HomeProxy sync ok +${result.imported} ~${result.updated} skip=${result.skipped} disabled=${result.disabled}`,
+        );
+      } else {
+        const result = await this.proxies.importFromWebshare({
+          mode: this.webshareMode(),
+          onlyValid: false,
+        });
+        this.lastResult = {
+          imported: result.imported,
+          updated: result.updated,
+          skipped: result.skipped,
+        };
+        this.lastError = null;
+        this.cooldownUntil = null;
+        this.lastFinishedAt = new Date();
+        this.logger.log(
+          `Webshare sync ok +${result.imported} ~${result.updated} skip=${result.skipped}`,
+        );
+      }
     } catch (e) {
       this.lastFinishedAt = new Date();
       if (e instanceof WebshareThrottledError) {
@@ -136,9 +195,8 @@ export class ProxiesSyncService implements OnModuleInit, OnModuleDestroy {
       } else {
         const msg = e instanceof Error ? e.message : String(e);
         this.lastError = msg;
-        // backoff ngắn khi lỗi khác
         this.cooldownUntil = new Date(Date.now() + 30_000);
-        this.logger.warn(`Webshare sync failed: ${msg}`);
+        this.logger.warn(`Proxy sync failed (${provider}): ${msg}`);
       }
     } finally {
       this.running = false;

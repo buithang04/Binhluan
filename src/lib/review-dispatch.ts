@@ -19,7 +19,10 @@ import { registerLoginWait, clearLoginWait } from "@/lib/review-login-wait";
 import { registerProxyWait, clearProxyWait } from "@/lib/review-proxy-wait";
 import { profileHasReviewAtPlace } from "@/lib/profile-place-review";
 import { resolveProjectPlaceKey } from "@/lib/place-key";
-import { isReviewAutoDispatchPaused } from "@/lib/review-dispatch-control";
+import {
+  getPausedProjectIds,
+  isProjectAutoDispatchPaused,
+} from "@/lib/review-dispatch-control";
 
 export type DispatchResult = {
   dispatched: number;
@@ -56,9 +59,12 @@ async function loadAssignmentsForDispatch(options: {
   /** Đăng tay 1 bài — bỏ qua cửa sổ lịch (PENDING/FAILED). */
   ignoreSchedule?: boolean;
   limit?: number;
+  /** Dự án đang tạm dừng auto — bỏ qua khi tick toàn cục. */
+  excludeProjectIds?: Set<string>;
 }) {
   const now = new Date();
   const limit = options.limit ?? 30;
+  const excluded = options.excludeProjectIds;
 
   if (options.assignmentId) {
     const one = await prisma.reviewAssignment.findFirst({
@@ -72,7 +78,9 @@ async function loadAssignmentsForDispatch(options: {
       },
       include: assignmentInclude,
     });
-    return one ? [one] : [];
+    if (!one) return [];
+    if (excluded?.has(one.plan.projectId)) return [];
+    return [one];
   }
 
   // Auto theo lịch: chỉ PENDING trong cửa sổ [scheduledAt, scheduledAt+grace]
@@ -91,7 +99,11 @@ async function loadAssignmentsForDispatch(options: {
       },
       plan: {
         status: "RUNNING",
-        ...(options.projectId ? { projectId: options.projectId } : {}),
+        ...(options.projectId
+          ? { projectId: options.projectId }
+          : excluded && excluded.size > 0
+            ? { projectId: { notIn: [...excluded] } }
+            : {}),
       },
     },
     orderBy: [{ scheduledAt: "asc" }, { sortOrder: "asc" }],
@@ -100,7 +112,10 @@ async function loadAssignmentsForDispatch(options: {
   });
 
   return candidates
-    .filter((a) => isWithinScheduleWindow(a.scheduledAt, now, graceMs))
+    .filter((a) => {
+      if (excluded?.has(a.plan.projectId)) return false;
+      return isWithinScheduleWindow(a.scheduledAt, now, graceMs);
+    })
     .slice(0, limit);
 }
 
@@ -403,6 +418,72 @@ async function recoverStuckAssignments(now: Date): Promise<void> {
     );
   }
 
+  // FAILED do Chrome/CDP tạm (Connection closed…) → PENDING để tick tự đăng lại (tối đa gần đây)
+  const chromeFlaky = await prisma.reviewAssignment.findMany({
+    where: {
+      status: "FAILED",
+      plan: { status: "RUNNING" },
+      updatedAt: { gte: new Date(now.getTime() - 3 * 60 * 60_000) },
+      OR: [
+        { error: { contains: "Connection closed" } },
+        { error: { contains: "Target closed" } },
+        { error: { contains: "Session closed" } },
+        { error: { contains: "Start-Process Chrome failed" } },
+        { error: { contains: "waitForDevTools" } },
+        { error: { contains: "browser has disconnected" } },
+        { error: { contains: "Tạm lỗi Chrome" } },
+      ],
+    },
+    select: { id: true, sortOrder: true, apmProfileId: true },
+    take: 40,
+  });
+  for (const a of chromeFlaky) {
+    await prisma.reviewAssignment.update({
+      where: { id: a.id },
+      data: {
+        status: "PENDING",
+        apmJobRunId: null,
+        scheduledAt: now,
+        error: "Đã tự mở lại sau lỗi Chrome tạm — chờ đăng lại",
+      },
+    });
+    if (a.apmProfileId) {
+      const prof = await prisma.profile.findUnique({
+        where: { id: a.apmProfileId },
+        select: { id: true, accountId: true, status: true },
+      });
+      if (prof) {
+        await prisma.profile
+          .updateMany({
+            where: {
+              id: prof.id,
+              status: { in: ["UNREADY", "READY"] },
+            },
+            data: {
+              status: "READY",
+              leaseToken: null,
+              leaseUntil: null,
+              currentTask: null,
+            },
+          })
+          .catch(() => undefined);
+        await prisma.googleAccount
+          .updateMany({
+            where: {
+              id: prof.accountId,
+              status: "UNREADY",
+              loginIssue: null,
+            },
+            data: { status: "READY" },
+          })
+          .catch(() => undefined);
+      }
+    }
+    console.log(
+      `[review-dispatch] auto-recover #${a.sortOrder + 1}: lỗi Chrome tạm → PENDING`,
+    );
+  }
+
   const stuck = await prisma.reviewAssignment.findMany({
     where: {
       status: { in: ["QUEUED", "RUNNING"] },
@@ -510,13 +591,12 @@ export async function dispatchDueReviewAssignments(options?: {
   assignmentId?: string;
   /** Retry tự động sau login — không mở lại Chrome, chỉ đăng khi READY. */
   autoContinue?: boolean;
-  /** Đăng tay / bấm nút trên UI — bỏ qua tạm dừng auto toàn hệ thống. */
+  /** Đăng tay / bấm nút trên UI — bỏ qua tạm dừng auto theo dự án. */
   ignorePause?: boolean;
 }): Promise<DispatchResult> {
   const now = new Date();
 
-  const manualDispatch =
-    Boolean(options?.ignorePause || options?.assignmentId);
+  const manualDispatch = Boolean(options?.ignorePause);
 
   await recoverStuckAssignments(now).catch((e) =>
     console.warn(
@@ -525,8 +605,15 @@ export async function dispatchDueReviewAssignments(options?: {
     ),
   );
 
-  if (!manualDispatch && (await isReviewAutoDispatchPaused())) {
-    return { dispatched: 0, errors: [], assignmentIds: [] };
+  let excludeProjectIds: Set<string> | undefined;
+  if (!manualDispatch) {
+    if (options?.projectId) {
+      if (await isProjectAutoDispatchPaused(options.projectId)) {
+        return { dispatched: 0, errors: [], assignmentIds: [] };
+      }
+    } else {
+      excludeProjectIds = await getPausedProjectIds();
+    }
   }
 
   const proxyCount = await countAvailableProxies(now);
@@ -551,7 +638,18 @@ export async function dispatchDueReviewAssignments(options?: {
     assignmentId: options?.assignmentId,
     ignoreSchedule: Boolean(options?.assignmentId),
     limit: batchLimit,
+    excludeProjectIds: manualDispatch ? undefined : excludeProjectIds,
   });
+
+  // assignmentId + project pause (login/proxy auto-continue)
+  if (
+    !manualDispatch &&
+    options?.assignmentId &&
+    assignments[0] &&
+    (await isProjectAutoDispatchPaused(assignments[0].plan.projectId))
+  ) {
+    return { dispatched: 0, errors: [], assignmentIds: [] };
+  }
 
   const result: DispatchResult = { dispatched: 0, errors: [], assignmentIds: [] };
   if (!assignments.length) {

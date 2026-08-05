@@ -8,11 +8,19 @@ import { spawn } from "child_process";
 import { Worker } from "bullmq";
 import IORedis from "ioredis";
 import puppeteer, { Browser } from "puppeteer";
-import { QUEUE_PROFILE_TASKS, QUEUE_BROWSER_CONTROL, ProfileTaskJob, BrowserControlJob, mapsReviewPayloadSchema } from "@apm/shared";
+import {
+  QUEUE_PROFILE_TASKS,
+  QUEUE_BROWSER_CONTROL,
+  ProfileTaskJob,
+  BrowserControlJob,
+  mapsReviewPayloadSchema,
+  mapsDeleteReviewPayloadSchema,
+} from "@apm/shared";
 import { browserPool } from "./browser-pool";
 import { HumanCursor } from "./humanize";
 import { applyStealth } from "./stealth";
 import { postMapsReview, assertGoogleSessionForMaps } from "./maps-review";
+import { deleteMapsReview } from "./maps-delete-review";
 import {
   attachProxyAuthToPage,
   assertProxyBeforeMaps,
@@ -292,12 +300,142 @@ function proxyServer(proxy: NonNullable<ClaimPayload["proxy"]>) {
   return `${proxy.protocol}://${proxy.host}:${proxy.port}`;
 }
 
+/** Serialize Start-Process — nhiều job cùng lúc dễ fail PowerShell/timeout. */
+let chromeSpawnChain: Promise<void> = Promise.resolve();
+
+function withChromeSpawnLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = chromeSpawnChain.then(fn, fn);
+  chromeSpawnChain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+/**
+ * Mở Chrome độc lập khỏi PM2 trên Windows — bắt buộc --user-data-dir.
+ * Win32_Process.Create: không dính job PM2; cmdline đầy đủ, không UseShellExecute.
+ */
+async function spawnChromeWindowsDetached(
+  exe: string,
+  args: string[],
+  browserIndex: number,
+): Promise<number | undefined> {
+  const { execFile } = await import("child_process");
+  const { promisify } = await import("util");
+  const execFileAsync = promisify(execFile);
+
+  const userDataArg = args.find((a) => /^--user-data-dir=/i.test(a));
+  if (!userDataArg) {
+    throw new Error(
+      `Chrome #${browserIndex}: thiếu --user-data-dir — từ chối mở (tránh Chrome mặc định / chọn profile)`,
+    );
+  }
+  const userDataDir = userDataArg.slice("--user-data-dir=".length).replace(/^"|"$/g, "");
+
+  return withChromeSpawnLock(async () => {
+    const argsFile = path.join(
+      process.env.TEMP || tmpdir(),
+      `binhluan-chrome-args-${browserIndex}-${Date.now()}.json`,
+    );
+    await writeFile(argsFile, JSON.stringify({ exe, args, userDataDir }), "utf8");
+    const filePs = argsFile.replace(/'/g, "''");
+
+    const tryWmiCreate = async (): Promise<number | undefined> => {
+      // Escape Win32 cmdline: quote arg nếu có space hoặc "
+      // KHÔNG escape backslash (lỗi cũ: [ \\t"] khiến mọi path Windows bị double-\\)
+      const ps = `
+$ErrorActionPreference = 'Stop'
+$j = Get-Content -LiteralPath '${filePs}' -Raw -Encoding UTF8 | ConvertFrom-Json
+$exe = [string]$j.exe
+$chromeArgs = @($j.args)
+$userDataDir = [string]$j.userDataDir
+if (-not ($chromeArgs | Where-Object { $_ -match '^--user-data-dir=' })) {
+  throw 'Missing --user-data-dir in args'
+}
+function Escape-WinArg([string]$a) {
+  if ($null -eq $a) { return '""' }
+  if ($a -notmatch '[ "]') { return $a }
+  return '"' + ($a -replace '"','""') + '"'
+}
+$cmd = (Escape-WinArg $exe) + ' ' + (($chromeArgs | ForEach-Object { Escape-WinArg ([string]$_) }) -join ' ')
+$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmd }
+if ($null -eq $r -or $r.ReturnValue -ne 0) {
+  throw ("Win32_Process.Create failed ReturnValue=" + $(if ($r) { $r.ReturnValue } else { 'null' }))
+}
+$procId = [int]$r.ProcessId
+Start-Sleep -Milliseconds 800
+# Xác minh process (hoặc con) thật sự dùng user-data-dir automation — không phải Chrome hệ thống
+$needle = $userDataDir.ToLowerInvariant()
+$ok = $false
+Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -ErrorAction SilentlyContinue | ForEach-Object {
+  $cl = [string]$_.CommandLine
+  if (-not $cl) { return }
+  if ($cl.ToLowerInvariant().Contains($needle)) { $script:ok = $true }
+}
+if (-not $ok) {
+  try { Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue } catch {}
+  throw ('Chrome opened WITHOUT automation user-data-dir (refused system profile picker). cmd=' + $cmd.Substring(0, [Math]::Min(240, $cmd.Length)))
+}
+Write-Output $procId
+`;
+      const { stdout, stderr } = await execFileAsync(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps],
+        { timeout: 45_000, windowsHide: true, encoding: "utf8", maxBuffer: 2 * 1024 * 1024 },
+      );
+      const pid = Number(
+        String(stdout || "")
+          .trim()
+          .split(/\r?\n/)
+          .filter(Boolean)
+          .pop(),
+      );
+      if (!Number.isFinite(pid) || pid <= 0) {
+        throw new Error(
+          `Win32_Process.Create không trả PID (stdout=${JSON.stringify(stdout)} stderr=${JSON.stringify(stderr)})`,
+        );
+      }
+      return pid;
+    };
+
+    const errors: string[] = [];
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const pid = await tryWmiCreate();
+        await unlink(argsFile).catch(() => undefined);
+        return pid;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        const stderr =
+          e && typeof e === "object" && "stderr" in e
+            ? String((e as { stderr?: string }).stderr || "")
+            : "";
+        errors.push(
+          `attempt${attempt}: ${msg}${stderr ? ` | stderr=${stderr.slice(0, 400)}` : ""}`,
+        );
+        console.warn(
+          `[worker] spawn Chrome #${browserIndex} fail ${attempt}/3: ${msg.slice(0, 240)}`,
+        );
+        await new Promise((r) => setTimeout(r, 800 * attempt));
+      }
+    }
+
+    await unlink(argsFile).catch(() => undefined);
+    throw new Error(
+      `Start-Process Chrome failed #${browserIndex}: ${errors.join(" || ")}`,
+    );
+  });
+}
+
 function chromeLaunchArgs(withProxy: boolean, proxy: ClaimPayload["proxy"], debugPort?: number) {
   const args: string[] = [
     "--start-maximized",
     "--disable-blink-features=AutomationControlled",
     "--no-first-run",
     "--no-default-browser-check",
+    // Profile trong user-data-dir automation (tránh màn "Who's using Chrome?")
+    "--profile-directory=Default",
     // Ẩn bubble "Restore pages? / Chrome didn't shut down correctly"
     "--hide-crash-restore-bubble",
     "--disable-session-crashed-bubble",
@@ -621,47 +759,15 @@ async function launchBrowser(
     `--user-data-dir=${userDataDir}`,
   ];
 
-  // Windows: KHÔNG spawn chrome.exe trực tiếp từ worker.
-  // PM2/taskkill /T giết cả process tree → cửa sổ Maps tắt mỗi lần restart.
-  // Start-Process (file JSON args) tạo process độc lập khỏi node/PM2.
+  // Windows: KHÔNG spawn chrome.exe trực tiếp từ worker (PM2 treekill).
+  // Start-Process / cmd start = process độc lập. Serialize + retry vì máy nhiều Chrome dễ fail.
   let spawnPid: number | undefined;
   if (process.platform === "win32") {
-    const { execFile } = await import("child_process");
-    const { promisify } = await import("util");
-    const execFileAsync = promisify(execFile);
-    const argsFile = path.join(
-      process.env.TEMP || tmpdir(),
-      `binhluan-chrome-args-${claim.profile.browserIndex}-${port}.json`,
+    spawnPid = await spawnChromeWindowsDetached(
+      exe,
+      args,
+      claim.profile.browserIndex,
     );
-    await writeFile(argsFile, JSON.stringify(args), "utf8");
-    const exePs = exe.replace(/'/g, "''");
-    const filePs = argsFile.replace(/'/g, "''");
-    const ps = `
-$chromeArgs = Get-Content -LiteralPath '${filePs}' -Raw -Encoding UTF8 | ConvertFrom-Json
-$p = Start-Process -FilePath '${exePs}' -ArgumentList $chromeArgs -PassThru -WindowStyle Normal
-Write-Output $p.Id
-Remove-Item -LiteralPath '${filePs}' -Force -ErrorAction SilentlyContinue
-`;
-    try {
-      const { stdout } = await execFileAsync(
-        "powershell.exe",
-        ["-NoProfile", "-NonInteractive", "-Command", ps],
-        { timeout: 15_000, windowsHide: true, encoding: "utf8" },
-      );
-      spawnPid = Number(
-        String(stdout || "")
-          .trim()
-          .split(/\r?\n/)
-          .filter(Boolean)
-          .pop(),
-      );
-      if (!Number.isFinite(spawnPid) || spawnPid <= 0) spawnPid = undefined;
-    } catch (e) {
-      await unlink(argsFile).catch(() => undefined);
-      throw new Error(
-        `Start-Process Chrome failed #${claim.profile.browserIndex}: ${e instanceof Error ? e.message : e}`,
-      );
-    }
   } else {
     const child = spawn(exe, args, {
       detached: true,
@@ -3085,9 +3191,139 @@ async function restoreProfileBrowserAfterMaps(
   );
 }
 
+/** Đóng hẳn Chrome sau MAPS_DELETE_REVIEW — không giữ cửa sổ như MAPS_REVIEW. */
+async function shutdownChromeAfterDelete(claim: ClaimPayload) {
+  const profileId = claim.profile.id;
+  const idx = claim.profile.browserIndex;
+  const live = browserPool.get(profileId);
+  if (live) live.mapsReviewInProgress = false;
+  busyProfileIds.delete(profileId);
+  setMapsChromeGuard(false);
+
+  const dir = path.resolve(STORAGE_DIR, claim.profile.browserProfilePath);
+  console.log(
+    `[worker] MAPS_DELETE_REVIEW #${idx} dọn Chrome sau xóa (forceClose + kill)…`,
+  );
+  await browserPool
+    .release(profileId, true, { forceClose: true })
+    .catch(() => undefined);
+
+  const prev = process.env.ALLOW_CHROME_KILL;
+  process.env.ALLOW_CHROME_KILL = "1";
+  try {
+    await killChromeUsingProfileDir(dir);
+  } finally {
+    if (prev === undefined) delete process.env.ALLOW_CHROME_KILL;
+    else process.env.ALLOW_CHROME_KILL = prev;
+  }
+}
+
+/** Xóa đánh giá Maps đã đăng — Chrome IP máy (không proxy), đúng account. */
+async function runMapsDeleteReviewJob(
+  claim: ClaimPayload,
+  job: ProfileTaskJob,
+  opts?: { signal?: AbortSignal },
+) {
+  const raw = job.payload ?? claim.job?.payload;
+  const payload = mapsDeleteReviewPayloadSchema.parse(raw ?? {});
+  const signal = opts?.signal;
+  const throwIfAborted = () => {
+    if (signal?.aborted) {
+      const err = new Error("MAPS_DELETE_REVIEW aborted (timeout/cancel)");
+      (err as { code?: string }).code = "ABORTED";
+      throw err;
+    }
+  };
+
+  const live = browserPool.get(claim.profile.id);
+  const reuse =
+    Boolean(live?.browser.connected) && live?.proxyEnabled === false;
+  const ensured = reuse
+    ? { browser: live!.browser, reused: true as const, pid: live!.pid }
+    : await connectOrLaunchBrowser(claim, { useProxy: false, neverKill: true });
+  const browser = ensured.browser;
+  const page =
+    reuse && live?.page && !live.page.isClosed()
+      ? live.page
+      : await setupPage(browser, claim, { useProxy: false });
+
+  if (!reuse) {
+    await browserPool.register({
+      profileId: claim.profile.id,
+      browserIndex: claim.profile.browserIndex,
+      browser,
+      page,
+      proxyId: "none",
+      cookiePath: claim.profile.cookiePath,
+      browserProfilePath: claim.profile.browserProfilePath,
+      openedAt: new Date(),
+      pid: ensured.pid || browser.process()?.pid,
+      accountEmail: claim.account.email,
+      markedReady: true,
+      proxyEnabled: false,
+      mapsReviewInProgress: true,
+      proxyAuth: null,
+    });
+  } else if (live) {
+    live.mapsReviewInProgress = true;
+  }
+
+  setMapsChromeGuard(true);
+  throwIfAborted();
+
+  console.log(
+    `[worker] MAPS_DELETE_REVIEW #${claim.profile.browserIndex} ${claim.account.email} assignment=${payload.assignmentId}`,
+  );
+
+  try {
+    await assertGoogleSessionForMaps(page, claim.account.email).catch((e) => {
+      throw new Error(
+        `Chưa đăng nhập Google để xóa review: ${e instanceof Error ? e.message : e}`,
+      );
+    });
+
+    throwIfAborted();
+    const out = await deleteMapsReview(page, payload, {
+      signal,
+      human: new HumanCursor(page),
+    });
+
+    if (!out.ok) {
+      throw new Error(out.detail || "Xóa review thất bại");
+    }
+
+    const browserVersion = (await browser.version().catch(() => "")) || "";
+
+    return {
+      browserVersion,
+      /** Không giữ Chrome — processJob sẽ forceClose + kill sau complete. */
+      keepAlive: false,
+      result: {
+        ok: true,
+        alreadyGone: out.alreadyGone,
+        deleted: true,
+        detail: out.detail,
+        assignmentId: payload.assignmentId,
+        reviewLink: payload.reviewLink ?? null,
+        placeUrl: payload.placeUrl,
+        browserIndex: claim.profile.browserIndex,
+        email: claim.account.email,
+        browserAlive: false,
+      },
+    };
+  } finally {
+    const pooled = browserPool.get(claim.profile.id);
+    if (pooled) pooled.mapsReviewInProgress = false;
+  }
+}
+
 /** Timeout cứng theo task — 1 job treo (CDP đơ, dialog nền…) không được chặn cả hàng đợi. */
 const TASK_TIMEOUT_MS: Record<string, number> = {
   MAPS_REVIEW: Math.max(180_000, Number(process.env.MAPS_REVIEW_TIMEOUT_MS || 15 * 60_000)),
+  MAPS_DELETE_REVIEW: Math.max(
+    60_000,
+    Number(process.env.MAPS_DELETE_TIMEOUT_MS || 8 * 60_000),
+  ),
   HEALTHCHECK: 4 * 60_000,
   BROWSER_CHECK: 4 * 60_000,
   LOGIN: 45 * 60_000,
@@ -3149,7 +3385,7 @@ async function processJob(job: ProfileTaskJob) {
     if (job.taskCode === "LOGIN") markLoginBusy(true);
     // MAPS: chỉ busy + chrome-guard sớm; mapsReviewInProgress gắn khi register
     // (tránh chặn forceClose đổi-proxy ở đầu job)
-    if (job.taskCode === "MAPS_REVIEW") {
+    if (job.taskCode === "MAPS_REVIEW" || job.taskCode === "MAPS_DELETE_REVIEW") {
       busyProfileIds.add(job.profileId);
       setMapsChromeGuard(true);
     }
@@ -3164,7 +3400,9 @@ async function processJob(job: ProfileTaskJob) {
           ? runBrowserCheck(claim)
           : job.taskCode === "MAPS_REVIEW"
             ? runMapsReviewJob(claim, job, { signal: abort.signal })
-            : runHealthcheck(claim);
+            : job.taskCode === "MAPS_DELETE_REVIEW"
+              ? runMapsDeleteReviewJob(claim, job, { signal: abort.signal })
+              : runHealthcheck(claim);
     const out = await runWithTimeout(
       taskPromise,
       taskTimeoutMs,
@@ -3192,11 +3430,18 @@ async function processJob(job: ProfileTaskJob) {
     if (job.taskCode === "MAPS_REVIEW" && liveAfter) {
       liveAfter.mapsReviewInProgress = false;
     }
+    if (job.taskCode === "MAPS_DELETE_REVIEW" && liveAfter) {
+      liveAfter.mapsReviewInProgress = false;
+    }
     let stillAlive = Boolean(liveAfter?.browser.connected);
     if (!stillAlive && job.taskCode === "MAPS_REVIEW") {
       const dir = path.resolve(STORAGE_DIR, claim.profile.browserProfilePath);
       const pid = await resolveChromePidByProfileDir(dir).catch(() => undefined);
       stillAlive = Boolean(pid);
+    }
+    // DELETE: luôn báo browserAlive=false — sẽ tắt Chrome ngay sau complete
+    if (job.taskCode === "MAPS_DELETE_REVIEW") {
+      stillAlive = false;
     }
     await api("/internal/jobs/complete", {
       profileId: job.profileId,
@@ -3221,6 +3466,9 @@ async function processJob(job: ProfileTaskJob) {
       `[worker] completed ${job.jobRunId} task=${job.taskCode} profile=${job.profileId} index=#${claim.profile.browserIndex}`,
       loginOut.result,
     );
+    if (job.taskCode === "MAPS_DELETE_REVIEW") {
+      await shutdownChromeAfterDelete(claim);
+    }
   } catch (err) {
     abort.abort();
     const code = err && typeof err === "object" ? (err as { code?: string }).code : undefined;
@@ -3261,6 +3509,14 @@ async function processJob(job: ProfileTaskJob) {
         `[worker] MAPS_REVIEW fail — giữ Chrome mở (alive=${alive}, pool=${Boolean(browserPool.get(job.profileId)?.browser.connected)}): ${error.slice(0, 160)}`,
       );
     }
+    if (job.taskCode === "MAPS_DELETE_REVIEW") {
+      const live = browserPool.get(job.profileId);
+      if (live) live.mapsReviewInProgress = false;
+      console.warn(
+        `[worker] MAPS_DELETE_REVIEW fail — sẽ đóng Chrome: ${error.slice(0, 160)}`,
+      );
+      alive = false;
+    }
     await api("/internal/jobs/fail", {
       profileId: job.profileId,
       leaseToken: job.leaseToken,
@@ -3275,6 +3531,13 @@ async function processJob(job: ProfileTaskJob) {
         `[worker] báo fail thất bại (job có thể đã bị reset): ${e instanceof Error ? e.message : e}`,
       ),
     );
+    if (job.taskCode === "MAPS_DELETE_REVIEW") {
+      await shutdownChromeAfterDelete(claim).catch((e) =>
+        console.warn(
+          `[worker] dọn Chrome sau delete-fail lỗi: ${e instanceof Error ? e.message : e}`,
+        ),
+      );
+    }
     throw err;
   } finally {
     // Chờ zombie task dừng hẳn trước khi nhả busy — tránh job kế kill Chrome đang Maps.
@@ -3288,7 +3551,9 @@ async function processJob(job: ProfileTaskJob) {
       ]);
     }
     if (job.taskCode === "LOGIN") markLoginBusy(false);
-    if (job.taskCode === "MAPS_REVIEW") markMapsBusy(false);
+    if (job.taskCode === "MAPS_REVIEW" || job.taskCode === "MAPS_DELETE_REVIEW") {
+      markMapsBusy(false);
+    }
   }
 }
 

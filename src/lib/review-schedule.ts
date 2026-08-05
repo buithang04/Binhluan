@@ -270,6 +270,30 @@ const ASSIGNMENT_STATUS_VI: Record<string, string> = {
   SKIPPED: "Bỏ qua",
 };
 
-export function assignmentStatusLabel(status: string): string {
+/** Bài đã xóa trên Maps (vẫn giữ trong kế hoạch). */
+export function isMapsDeletedAssignment(a: {
+  status?: string | null;
+  error?: string | null;
+  reviewVisibility?: string | null;
+}): boolean {
+  if (a.reviewVisibility === "DELETED") return true;
+  if (/^Đã xóa trên Maps/i.test((a.error || "").trim())) return true;
+  return false;
+}
+
+export function assignmentStatusLabel(
+  status: string,
+  opts?: { error?: string | null; reviewVisibility?: string | null },
+): string {
+  if (
+    opts &&
+    isMapsDeletedAssignment({
+      status,
+      error: opts.error,
+      reviewVisibility: opts.reviewVisibility,
+    })
+  ) {
+    return "Đã xóa";
+  }
   return ASSIGNMENT_STATUS_VI[status] ?? status;
 }

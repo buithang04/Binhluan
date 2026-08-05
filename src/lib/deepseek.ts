@@ -183,9 +183,13 @@ export async function enhanceWithDeepSeek(
 
   const isEn = context.contentLanguage === "EN";
   const langLabel = isEn ? "English" : "Vietnamese";
+  const normalizedWordCount =
+    context.contentWordCount != null && Number.isFinite(context.contentWordCount)
+      ? Math.floor(Math.max(0, Math.floor(context.contentWordCount)) / 3) * 2
+      : null;
   const wordHint =
-    context.contentWordCount != null
-      ? `Target length: about ${context.contentWordCount} words.`
+    normalizedWordCount != null
+      ? `Target length: about ${normalizedWordCount} words.`
       : "";
 
   const messages: DeepSeekMessage[] = [
@@ -202,7 +206,7 @@ Audience: ${context.targetAudience}
 Language: ${langLabel}
 Content direction: ${context.contentDirection || "n/a"}
 Notes: ${context.writingNotes || "n/a"}
-Reference example: ${context.contentExample || "n/a"}
+Real review samples: ${context.contentExample || "n/a"}
 ${wordHint}
 
 Rewrite the following outreach text:

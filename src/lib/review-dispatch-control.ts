@@ -2,37 +2,110 @@ import "server-only";
 
 import { prisma } from "@/lib/prisma";
 
-/** SystemSetting — tạm dừng enqueue tự động (loop/cron), không chặn Đăng tay. */
+/** Legacy — pause mọi dự án (đã bỏ; clear khi đọc/ghi per-project). */
 export const REVIEW_AUTO_DISPATCH_PAUSED_KEY = "review_auto_dispatch_paused";
 
-let cache: { paused: boolean; at: number } | null = null;
+const KEY_PREFIX = "review_auto_dispatch_paused:";
+
+function projectPauseKey(projectId: string) {
+  return `${KEY_PREFIX}${projectId}`;
+}
+
+let cache: Map<string, { paused: boolean; at: number }> | null = null;
+let pausedIdsCache: { ids: Set<string>; at: number } | null = null;
 const CACHE_MS = 2_000;
 
-export async function isReviewAutoDispatchPaused(): Promise<boolean> {
+function getCacheMap() {
+  if (!cache) cache = new Map();
+  return cache;
+}
+
+async function clearLegacyGlobalPause() {
+  await prisma.systemSetting
+    .deleteMany({ where: { key: REVIEW_AUTO_DISPATCH_PAUSED_KEY } })
+    .catch(() => undefined);
+}
+
+export async function isProjectAutoDispatchPaused(
+  projectId: string,
+): Promise<boolean> {
   const now = Date.now();
-  if (cache && now - cache.at < CACHE_MS) return cache.paused;
+  const map = getCacheMap();
+  const hit = map.get(projectId);
+  if (hit && now - hit.at < CACHE_MS) return hit.paused;
 
   const row = await prisma.systemSetting.findUnique({
-    where: { key: REVIEW_AUTO_DISPATCH_PAUSED_KEY },
+    where: { key: projectPauseKey(projectId) },
   });
   const paused = row?.value === "1" || row?.value === "true";
-  cache = { paused, at: now };
+  map.set(projectId, { paused, at: now });
   return paused;
 }
 
-export async function setReviewAutoDispatchPaused(
+/** @deprecated Dùng isProjectAutoDispatchPaused — giữ để tương thích import cũ. */
+export async function isReviewAutoDispatchPaused(
+  projectId?: string,
+): Promise<boolean> {
+  if (projectId) return isProjectAutoDispatchPaused(projectId);
+  // Không còn pause toàn cục: loop luôn chạy, lọc theo dự án.
+  return false;
+}
+
+export async function getPausedProjectIds(): Promise<Set<string>> {
+  const now = Date.now();
+  if (pausedIdsCache && now - pausedIdsCache.at < CACHE_MS) {
+    return pausedIdsCache.ids;
+  }
+
+  const rows = await prisma.systemSetting.findMany({
+    where: {
+      key: { startsWith: KEY_PREFIX },
+      value: { in: ["1", "true"] },
+    },
+    select: { key: true },
+  });
+
+  const ids = new Set(
+    rows
+      .map((r) => r.key.slice(KEY_PREFIX.length))
+      .filter((id) => id.length > 0),
+  );
+  pausedIdsCache = { ids, at: now };
+  return ids;
+}
+
+export async function setProjectAutoDispatchPaused(
+  projectId: string,
   paused: boolean,
 ): Promise<{ paused: boolean }> {
-  await prisma.systemSetting.upsert({
-    where: { key: REVIEW_AUTO_DISPATCH_PAUSED_KEY },
-    create: { key: REVIEW_AUTO_DISPATCH_PAUSED_KEY, value: paused ? "1" : "0" },
-    update: { value: paused ? "1" : "0" },
-  });
-  cache = { paused, at: Date.now() };
+  const key = projectPauseKey(projectId);
+  if (paused) {
+    await prisma.systemSetting.upsert({
+      where: { key },
+      create: { key, value: "1" },
+      update: { value: "1" },
+    });
+  } else {
+    await prisma.systemSetting.deleteMany({ where: { key } });
+  }
+  await clearLegacyGlobalPause();
+  invalidateReviewAutoDispatchCache();
+  getCacheMap().set(projectId, { paused, at: Date.now() });
   return { paused };
 }
 
-/** Xóa cache sau khi đổi trạng thái từ API (đồng bộ giữa instance). */
+/** @deprecated */
+export async function setReviewAutoDispatchPaused(
+  paused: boolean,
+  projectId?: string,
+): Promise<{ paused: boolean }> {
+  if (!projectId) {
+    throw new Error("Cần projectId — pause theo từng dự án");
+  }
+  return setProjectAutoDispatchPaused(projectId, paused);
+}
+
 export function invalidateReviewAutoDispatchCache() {
   cache = null;
+  pausedIdsCache = null;
 }

@@ -6,6 +6,7 @@ import { decryptSecret, encryptSecret } from "@apm/crypto";
 import { createAccountSchema, normalizeTotpSecret } from "@apm/shared";
 import { z } from "zod";
 import { PrismaService } from "../prisma/prisma.service";
+import { ProfilesService } from "../profiles/profiles.service";
 
 function tryDecrypt(payload: unknown): string | null {
   if (!payload) return null;
@@ -59,7 +60,10 @@ function resolveStorageDir() {
 
 @Injectable()
 export class AccountsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly profiles: ProfilesService,
+  ) {}
 
   async list() {
     const rows = await this.prisma.googleAccount.findMany({
@@ -132,6 +136,7 @@ export class AccountsService {
       totp?: string | null;
     }>;
     updateExisting?: boolean;
+    autoAssignAfterImport?: boolean;
   }) {
     const rows = Array.isArray(input?.accounts) ? input.accounts : [];
     if (!rows.length) {
@@ -238,6 +243,24 @@ export class AccountsService {
       }
     }
 
+    let autoAssigned = 0;
+    const autoAssignErrors: Array<{ accountId: string; email: string; error: string }> = [];
+    if (input.autoAssignAfterImport && created.length > 0) {
+      for (let i = 0; i < created.length; i++) {
+        const acc = created[i]!;
+        try {
+          await this.profiles.autoAssign(acc.id, 60, { openLogin: true });
+          autoAssigned += 1;
+        } catch (e) {
+          autoAssignErrors.push({
+            accountId: acc.id,
+            email: acc.email,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+      }
+    }
+
     return {
       ok: true,
       created: created.length,
@@ -248,7 +271,14 @@ export class AccountsService {
       updatedIds: updated,
       skippedRows: skipped,
       errors,
-      message: `Import xong: +${created.length} mới, ${updated.length} cập nhật, ${skipped.length} bỏ qua, ${errors.length} lỗi`,
+      autoAssigned,
+      autoAssignFailed: autoAssignErrors.length,
+      autoAssignErrors: autoAssignErrors.slice(0, 20),
+      message: `Import xong: +${created.length} mới, ${updated.length} cập nhật, ${skipped.length} bỏ qua, ${errors.length} lỗi${
+        input.autoAssignAfterImport
+          ? ` · Auto-gán hồ sơ: ${autoAssigned}/${created.length}`
+          : ""
+      }`,
     };
   }
 

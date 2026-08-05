@@ -54,6 +54,8 @@ export const TaskCode = {
   HEALTHCHECK: "HEALTHCHECK",
   BROWSER_CHECK: "BROWSER_CHECK",
   MAPS_REVIEW: "MAPS_REVIEW",
+  /** Xóa review đã đăng trên Maps (đúng account đã post). */
+  MAPS_DELETE_REVIEW: "MAPS_DELETE_REVIEW",
 } as const;
 export type TaskCode = (typeof TaskCode)[keyof typeof TaskCode];
 
@@ -69,12 +71,27 @@ export const mapsReviewPayloadSchema = z.object({
 });
 export type MapsReviewPayload = z.infer<typeof mapsReviewPayloadSchema>;
 
+export const mapsDeleteReviewPayloadSchema = z.object({
+  assignmentId: z.string().uuid(),
+  placeUrl: z.string().min(10).max(2000),
+  reviewText: z.string().max(4000).optional().nullable(),
+  reviewLink: z.string().max(2000).optional().nullable(),
+  stars: z.number().int().min(1).max(5).optional().nullable(),
+});
+export type MapsDeleteReviewPayload = z.infer<
+  typeof mapsDeleteReviewPayloadSchema
+>;
+
 export type ProfileTaskJob = {
   profileId: string;
   taskCode: TaskCode;
   leaseToken: string;
   jobRunId: string;
-  payload?: MapsReviewPayload | Record<string, unknown> | null;
+  payload?:
+    | MapsReviewPayload
+    | MapsDeleteReviewPayload
+    | Record<string, unknown>
+    | null;
 };
 
 export const createAccountSchema = z.object({
@@ -150,7 +167,14 @@ export const loginSchema = z.object({
 
 export const enqueueTaskSchema = z.object({
   taskCode: z
-    .enum(["LOGIN", "HEALTHCHECK", "BROWSER_CHECK", "MAPS_REVIEW"])
+    .enum([
+      "LOGIN",
+      "HEALTHCHECK",
+      "BROWSER_CHECK",
+      "MAPS_REVIEW",
+      "MAPS_DELETE_REVIEW",
+    ])
     .default("HEALTHCHECK"),
-  payload: mapsReviewPayloadSchema.optional().nullable(),
+  /** Validate theo task trong ProfilesService.enqueue */
+  payload: z.unknown().optional().nullable(),
 });

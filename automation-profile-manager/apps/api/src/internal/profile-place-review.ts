@@ -42,6 +42,10 @@ export async function upsertProfilePlaceReviewTx(
     source: input.source ?? "POSTED",
     visibility: input.visibility ?? (input.reviewLink ? "UNKNOWN" : "VISIBLE"),
     postedAt: new Date(),
+    lastVerifiedAt:
+      input.visibility === "DELETED" || input.visibility === "VISIBLE"
+        ? new Date()
+        : undefined,
   };
 
   await tx.profilePlaceReview.upsert({
@@ -65,6 +69,7 @@ export async function upsertProfilePlaceReviewTx(
       source: data.source,
       visibility: data.visibility,
       postedAt: data.postedAt,
+      ...(data.lastVerifiedAt ? { lastVerifiedAt: data.lastVerifiedAt } : {}),
     },
   });
 }
@@ -112,6 +117,7 @@ export async function loadAssignmentPlaceContext(
     id: string;
     stars: number;
     reviewText: string;
+    reviewLink: string | null;
     profileEmail: string | null;
     apmProfileId: string | null;
   };
@@ -130,6 +136,7 @@ export async function loadAssignmentPlaceContext(
       id: true,
       stars: true,
       reviewText: true,
+      reviewLink: true,
       profileEmail: true,
       apmProfileId: true,
       plan: {
