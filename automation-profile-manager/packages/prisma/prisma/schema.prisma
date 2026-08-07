@@ -59,6 +59,15 @@ enum AccountStatus {
   DISABLED
 }
 
+/** Trạng thái đồng bộ hồ sơ Google (tên / avatar / địa chỉ). */
+enum ProfileSyncStatus {
+  PENDING
+  SYNCING
+  SYNCED
+  NEEDS_MANUAL
+  FAILED
+}
+
 enum ProxyStatus {
   ACTIVE
   DISABLED
@@ -104,6 +113,21 @@ model GoogleAccount {
   status        AccountStatus @default(UNREADY)
   /** Lỗi login gần nhất: EMAIL_NOT_FOUND | WRONG_PASSWORD | RECAPTCHA | BROWSER_BLOCKED | CHALLENGE */
   loginIssue    String?
+  /** Tên hiển thị mong muốn trên Google Personal info. */
+  desiredName         String?
+  /** Địa chỉ mong muốn (Home) — semi-auto. */
+  desiredAddress      String?
+  /** URL ảnh đại diện ngoài — server cache local trước khi worker upload. */
+  desiredAvatarUrl    String?
+  /** Path file avatar đã cache (worker đọc). */
+  avatarLocalPath     String?
+  /** Tên Google thực tế (quét từ myaccount.google.com/personal-info). */
+  googleName          String?
+  /** Avatar URL thực tế trên Google (quét từ /profile-picture). */
+  googleAvatar        String?
+  profileSyncStatus   ProfileSyncStatus?
+  profileSyncError    String?
+  profileSyncedAt     DateTime?
   lastLogin     DateTime?
   nextLogin     DateTime?
   createdAt     DateTime      @default(now())

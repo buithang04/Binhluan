@@ -48,7 +48,8 @@ export class QueueService implements OnModuleDestroy {
     const attempts =
       job.taskCode === "LOGIN" ||
       job.taskCode === "MAPS_REVIEW" ||
-      job.taskCode === "MAPS_DELETE_REVIEW"
+      job.taskCode === "MAPS_DELETE_REVIEW" ||
+      job.taskCode === "SCAN_GOOGLE_PROFILE"
         ? 1
         : 3;
     return this.profileTasks.add(job.taskCode, job, {

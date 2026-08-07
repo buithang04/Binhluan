@@ -1,14 +1,16 @@
 "use client";
 
 import { useSession } from "next-auth/react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { StatusLight, formatAliveLabel, formatLoginStatus } from "@/components/StatusLight";
 import { AdminLiveBrowserSync } from "@/components/AdminLiveBrowserSync";
 import { apmFetch } from "@/lib/apm-client";
 import {
   downloadAccountsTemplate,
   parseAccountsSpreadsheet,
+  parseProfileSpreadsheet,
   type ImportAccountRow,
+  type ProfileSheetRow,
 } from "@/lib/import-accounts";
 
 type Profile = {
@@ -29,6 +31,17 @@ type Account = {
   totpSecret?: string;
   hasPassword?: boolean;
   hasTotp?: boolean;
+  desiredName?: string | null;
+  desiredAddress?: string | null;
+  desiredAvatarUrl?: string | null;
+  avatarLocalPath?: string | null;
+  /** Tên Google thực tế (quét từ myaccount.google.com). */
+  googleName?: string | null;
+  /** Avatar URL Google thực tế. */
+  googleAvatar?: string | null;
+  profileSyncStatus?: string | null;
+  profileSyncError?: string | null;
+  profileSyncedAt?: string | null;
   profile?: Profile | null;
 };
 
@@ -53,6 +66,42 @@ type ImportResult = {
 };
 
 /** Lỗi cứng — sang acc tiếp. RECAPTCHA/CHALLENGE = chờ giải tay, không bỏ qua. */
+function profileSyncLabel(status?: string | null, error?: string | null): string {
+  const v = (status || "").toUpperCase();
+  if (v === "SYNCED") return "Đã đồng bộ";
+  if (v === "SYNCING") return "Đang đổi…";
+  if (v === "NEEDS_MANUAL") return error ? `Chờ tay: ${error.slice(0, 40)}` : "Chờ giải tay";
+  if (v === "FAILED") return error ? `Lỗi: ${error.slice(0, 40)}` : "Lỗi đồng bộ";
+  if (v === "PENDING") return "Chờ chạy";
+  return "—";
+}
+
+function accountHasDesiredProfile(account: Account): boolean {
+  return Boolean(
+    account.desiredName ||
+      account.desiredAddress ||
+      account.desiredAvatarUrl ||
+      account.avatarLocalPath,
+  );
+}
+
+const MAX_AVATAR_BYTES = 8 * 1024 * 1024;
+const AVATAR_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+
+function fileStem(fileName: string): string {
+  return fileName.replace(/\.[^.]+$/, "").trim().toLowerCase();
+}
+
+async function fileToBase64(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
 function isPermanentLoginIssue(issue?: string | null): boolean {
   const v = (issue || "").toUpperCase();
   return (
@@ -71,6 +120,8 @@ function needsLiveStatus(list: Account[]): boolean {
   return list.some(
     (a) =>
       a.loginIssue ||
+      a.profileSyncStatus === "SYNCING" ||
+      a.profileSyncStatus === "NEEDS_MANUAL" ||
       a.profile?.browserAlive ||
       a.profile?.status === "QUEUED" ||
       a.profile?.status === "RUNNING",
@@ -92,6 +143,11 @@ function accountsSnapshot(list: Account[]): string {
           a.profile?.status ?? "",
           a.profile?.browserIndex ?? "",
           a.profile?.browserAlive ? "1" : "0",
+          a.profileSyncStatus ?? "",
+          a.desiredName ?? "",
+          a.avatarLocalPath ?? "",
+          a.googleName ?? "",
+          a.googleAvatar ?? "",
         ].join("|"),
     )
     .join(";");
@@ -154,13 +210,19 @@ export default function AdminAccountsPage() {
   const { data: session, status: sessionStatus } = useSession();
   const token = session?.apmAccessToken;
   const fileRef = useRef<HTMLInputElement>(null);
+  const avatarFileRef = useRef<HTMLInputElement>(null);
+  const profileSheetRef = useRef<HTMLInputElement>(null);
+  const maleDirRef = useRef<HTMLInputElement>(null);
+  const femaleDirRef = useRef<HTMLInputElement>(null);
 
   const [rows, setRows] = useState<Account[]>([]);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [panel, setPanel] = useState<"add" | "edit" | "import" | null>(null);
+  const [panel, setPanel] = useState<
+    "add" | "edit" | "import" | "assign-profile" | null
+  >(null);
   const [editing, setEditing] = useState<Account | null>(null);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState(emptyForm);
@@ -168,10 +230,16 @@ export default function AdminAccountsPage() {
   const [importFileName, setImportFileName] = useState("");
   const [updateExisting, setUpdateExisting] = useState(false);
   const [importAutoAssign, setImportAutoAssign] = useState(true);
+  const [importApplyProfile, setImportApplyProfile] = useState(false);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<(typeof PAGE_SIZE_OPTIONS)[number]>(20);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [profileRows, setProfileRows] = useState<ProfileSheetRow[]>([]);
+  const [profileFileName, setProfileFileName] = useState("");
+  const [maleFiles, setMaleFiles] = useState<File[]>([]);
+  const [femaleFiles, setFemaleFiles] = useState<File[]>([]);
+  const [assignProgress, setAssignProgress] = useState("");
 
   const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
   const safePage = Math.min(page, totalPages);
@@ -184,6 +252,39 @@ export default function AdminAccountsPage() {
   const somePageSelected = selectedOnPage.length > 0 && !allPageSelected;
   const selectedCount = selectedIds.size;
   const selectedAccounts = rows.filter((r) => selectedIds.has(r.id));
+
+  /**
+   * Ghép lần lượt: tài khoản thứ i ← dòng Excel thứ i.
+   * Ảnh lấy theo giới tính, mỗi ảnh dùng đúng một lần; hết ảnh thì bỏ trống.
+   */
+  const assignmentPlan = useMemo(() => {
+    const pairCount = Math.min(selectedAccounts.length, profileRows.length);
+    let maleIdx = 0;
+    let femaleIdx = 0;
+    const items = [] as Array<{
+      account: Account;
+      row: ProfileSheetRow;
+      file: File | null;
+    }>;
+    for (let i = 0; i < pairCount; i++) {
+      const account = selectedAccounts[i]!;
+      const row = profileRows[i]!;
+      let file: File | null = null;
+      if (row.gender === "MALE" && maleIdx < maleFiles.length) {
+        file = maleFiles[maleIdx++]!;
+      } else if (row.gender === "FEMALE" && femaleIdx < femaleFiles.length) {
+        file = femaleFiles[femaleIdx++]!;
+      }
+      items.push({ account, row, file });
+    }
+    return {
+      items,
+      withAvatar: items.filter((x) => x.file).length,
+      noGender: items.filter((x) => !x.row.gender).length,
+      unusedAccounts: Math.max(0, selectedAccounts.length - pairCount),
+      unusedRows: Math.max(0, profileRows.length - pairCount),
+    };
+  }, [selectedAccounts, profileRows, maleFiles, femaleFiles]);
 
   useEffect(() => {
     if (page > totalPages) setPage(totalPages);
@@ -308,6 +409,7 @@ export default function AdminAccountsPage() {
     setImportFileName("");
     setUpdateExisting(false);
     setImportAutoAssign(false);
+    setImportApplyProfile(false);
     setError("");
     setMessage("");
   }
@@ -322,7 +424,7 @@ export default function AdminAccountsPage() {
       if (!parsed.length) {
         setImportRows([]);
         setImportFileName(file.name);
-        setError("File không có dòng hợp lệ. Cần 3 cột: tk, mk (2fa tuỳ chọn).");
+        setError("File không có dòng hợp lệ. Cần cột tk, mk (2fa / ten / diachi / avatar tuỳ chọn).");
         return;
       }
       setImportRows(parsed);
@@ -347,6 +449,7 @@ export default function AdminAccountsPage() {
           accounts: importRows,
           updateExisting,
           autoAssignAfterImport: importAutoAssign,
+          applyProfileAfterImport: importApplyProfile,
         }),
       });
       setMessage(res.message || "Nhập xong");
@@ -666,6 +769,272 @@ export default function AdminAccountsPage() {
     setBulkBusy(false);
   }
 
+  async function uploadSelectedAvatars(files: FileList | null) {
+    if (!token || !files?.length || !selectedAccounts.length) return;
+    const picked = Array.from(files);
+    if (avatarFileRef.current) avatarFileRef.current.value = "";
+
+    const invalid = picked.find(
+      (file) =>
+        file.size < 512 ||
+        file.size > MAX_AVATAR_BYTES ||
+        (!AVATAR_TYPES.has(file.type) && !/\.(jpe?g|png|webp)$/i.test(file.name)),
+    );
+    if (invalid) {
+      setError(
+        `${invalid.name}: chỉ nhận JPG/PNG/WebP, kích thước 512B–8MB.`,
+      );
+      return;
+    }
+
+    let assignments: Array<{ account: Account; file: File }> = [];
+    if (selectedAccounts.length === 1) {
+      if (picked.length !== 1) {
+        setError("Khi chọn 1 tài khoản, hãy chọn đúng 1 file ảnh.");
+        return;
+      }
+      assignments = [{ account: selectedAccounts[0]!, file: picked[0]! }];
+    } else {
+      const byStem = new Map<string, File>();
+      for (const file of picked) {
+        const stem = fileStem(file.name);
+        if (byStem.has(stem)) {
+          setError(`Trùng tên file: ${file.name}`);
+          return;
+        }
+        byStem.set(stem, file);
+      }
+      const missing = selectedAccounts.filter(
+        (account) => !byStem.has(account.email.toLowerCase()),
+      );
+      if (missing.length) {
+        setError(
+          `Upload nhiều tài khoản: tên file phải bằng email, ví dụ ${missing[0]!.email}.jpg. Thiếu ${missing
+            .slice(0, 3)
+            .map((a) => a.email)
+            .join(", ")}.`,
+        );
+        return;
+      }
+      assignments = selectedAccounts.map((account) => ({
+        account,
+        file: byStem.get(account.email.toLowerCase())!,
+      }));
+    }
+
+    setBulkBusy(true);
+    setError("");
+    setMessage("");
+    let uploaded = 0;
+    const failures: string[] = [];
+    try {
+      for (const { account, file } of assignments) {
+        try {
+          setMessage(
+            `Đang upload avatar ${uploaded + 1}/${assignments.length}: ${account.email}…`,
+          );
+          const dataBase64 = await fileToBase64(file);
+          await apmFetch(`/accounts/${account.id}/avatar-upload`, token, {
+            method: "POST",
+            body: JSON.stringify({ fileName: file.name, dataBase64 }),
+          });
+          uploaded += 1;
+        } catch (err) {
+          failures.push(
+            `${account.email}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      await load();
+      setMessage(
+        `Đã lưu avatar ${uploaded}/${assignments.length} tài khoản. Bấm “Đổi hồ sơ Google” để áp dụng.`,
+      );
+      if (failures.length) setError(failures.slice(0, 3).join("; "));
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  function openAssignProfile() {
+    setPanel("assign-profile");
+    setEditing(null);
+    setAssignProgress("");
+    setError("");
+    setMessage("");
+  }
+
+  async function onPickProfileSheet(file: File | null) {
+    if (!file) return;
+    setError("");
+    setMessage("");
+    try {
+      const parsed = parseProfileSpreadsheet(await file.arrayBuffer());
+      setProfileFileName(file.name);
+      setProfileRows(parsed);
+      if (!parsed.length) {
+        setError("File không có dòng hợp lệ. Cần cột Họ tên / Giới tính / Địa chỉ.");
+        return;
+      }
+      setMessage(`Đã đọc ${parsed.length} hồ sơ từ ${file.name}`);
+    } catch (e) {
+      setProfileRows([]);
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  function onPickGenderImages(gender: "MALE" | "FEMALE", files: FileList | null) {
+    if (!files?.length) return;
+    const picked = Array.from(files)
+      .filter((f) => AVATAR_TYPES.has(f.type) || /\.(jpe?g|png|webp)$/i.test(f.name))
+      .sort((a, b) => a.name.localeCompare(b.name, "en", { numeric: true }));
+    const tooBig = picked.find((f) => f.size > MAX_AVATAR_BYTES || f.size < 512);
+    if (tooBig) {
+      setError(`${tooBig.name}: ảnh phải từ 512B đến 8MB.`);
+      return;
+    }
+    if (!picked.length) {
+      setError("Thư mục không có ảnh JPG/PNG/WebP hợp lệ.");
+      return;
+    }
+    setError("");
+    if (gender === "MALE") setMaleFiles(picked);
+    else setFemaleFiles(picked);
+    setMessage(
+      `Đã nạp ${picked.length} ảnh ${gender === "MALE" ? "nam" : "nữ"}.`,
+    );
+  }
+
+  async function applyProfileAssignment() {
+    if (!token || !assignmentPlan.items.length) return;
+    const { items, withAvatar } = assignmentPlan;
+    const ok = window.confirm(
+      `Gán hồ sơ cho ${items.length} tài khoản?\n` +
+        `Có ảnh đại diện: ${withAvatar}. Không có ảnh: ${items.length - withAvatar}.\n` +
+        "Chỉ lưu vào hệ thống, chưa đổi trên Google.",
+    );
+    if (!ok) return;
+
+    setBulkBusy(true);
+    setError("");
+    setMessage("");
+    setAssignProgress("Đang lưu tên và địa chỉ…");
+    const failures: string[] = [];
+
+    try {
+      const saved = await apmFetch<{ updated?: number; message?: string }>(
+        "/accounts/desired-profile/bulk",
+        token,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            items: items.map(({ account, row }) => ({
+              accountId: account.id,
+              desiredName: row.name || null,
+              desiredAddress: row.address || null,
+            })),
+          }),
+        },
+      );
+
+      let uploaded = 0;
+      const withFiles = items.filter((x) => x.file);
+      for (const { account, file } of withFiles) {
+        try {
+          setAssignProgress(
+            `Đang tải ảnh ${uploaded + 1}/${withFiles.length}: ${account.email}…`,
+          );
+          const dataBase64 = await fileToBase64(file!);
+          await apmFetch(`/accounts/${account.id}/avatar-upload`, token, {
+            method: "POST",
+            body: JSON.stringify({ fileName: file!.name, dataBase64 }),
+          });
+          uploaded += 1;
+        } catch (err) {
+          failures.push(
+            `${account.email}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+
+      await load();
+      setMessage(
+        `${saved.message || `Đã lưu ${saved.updated ?? items.length} hồ sơ`} · Ảnh đại diện: ${uploaded}/${withFiles.length}. Bấm “Đổi hồ sơ Google” để áp dụng lên Google.`,
+      );
+      if (failures.length) setError(failures.slice(0, 3).join("; "));
+      setPanel(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAssignProgress("");
+      setBulkBusy(false);
+    }
+  }
+
+  async function bulkProfileUpdate() {
+    if (!token || !selectedAccounts.length) return;
+    const eligible = selectedAccounts.filter(
+      (a) => accountIsReady(a) && accountHasDesiredProfile(a),
+    );
+    if (!eligible.length) {
+      setError(
+        "Tài khoản đã chọn chưa đủ điều kiện: cần READY và đã được gán tên/địa chỉ/ảnh. Dùng nút “Gán hồ sơ Excel” để gán trước, rồi bấm lại.",
+      );
+      return;
+    }
+    const ok = window.confirm(
+      `Đổi hồ sơ Google cho ${eligible.length} tài khoản?\nChạy lần lượt — dừng nếu cần giải Verify it's you.`,
+    );
+    if (!ok) return;
+
+    setBulkBusy(true);
+    setError("");
+    setMessage("");
+    let done = 0;
+    const fails: string[] = [];
+    let stoppedManual = false;
+
+    for (const acc of eligible) {
+      try {
+        setMessage(`Đang đổi hồ sơ ${done + 1}/${eligible.length}: ${acc.email}…`);
+        await apmFetch(`/accounts/${acc.id}/profile-update`, token, {
+          method: "POST",
+          body: "{}",
+        });
+
+        const deadline = Date.now() + 15 * 60_000;
+        while (Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 3000));
+          const list = await apmFetch<Account[]>("/accounts", token);
+          const cur = list.find((a) => a.id === acc.id);
+          if (!cur) break;
+          const ps = (cur.profileSyncStatus || "").toUpperCase();
+          if (ps === "SYNCED") break;
+          if (ps === "NEEDS_MANUAL") {
+            stoppedManual = true;
+            setMessage(
+              `DỪNG — ${cur.email}: cần giải Verify / xác minh tay trên Chrome. Không chạy acc tiếp.`,
+            );
+            break;
+          }
+          if (ps === "FAILED" || cur.profile?.status === "READY") break;
+          if (cur.profile?.status !== "QUEUED" && cur.profile?.status !== "RUNNING") break;
+        }
+        done += 1;
+        if (stoppedManual) break;
+        await new Promise((r) => setTimeout(r, 4000));
+      } catch (err) {
+        fails.push(`${acc.email}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    await load();
+    if (!stoppedManual) {
+      setMessage(`Đã chạy đổi hồ sơ ${done}/${eligible.length} tài khoản.`);
+    }
+    if (fails.length) setError(fails.slice(0, 3).join("; "));
+    setBulkBusy(false);
+  }
+
   async function verifyAllProfiles() {
     if (!token) return;
     const ok = window.confirm(
@@ -750,6 +1119,110 @@ export default function AdminAccountsPage() {
     }
   }
 
+  /** Quét hồ sơ Google (name + avatar) cho các account đã chọn. */
+  async function bulkScanGoogleProfile() {
+    if (!token || !selectedAccounts.length) return;
+    const eligible = selectedAccounts.filter((a) => accountIsReady(a));
+    if (!eligible.length) {
+      setError("Tài khoản đã chọn cần ở trạng thái READY để quét.");
+      return;
+    }
+    const ok = window.confirm(
+      `Quét hồ sơ Google (tên + avatar) cho ${eligible.length} tài khoản?\nChạy lần lượt — dừng nếu cần giải Verify it's you.`,
+    );
+    if (!ok) return;
+
+    setBulkBusy(true);
+    setError("");
+    setMessage("");
+    let done = 0;
+    const fails: string[] = [];
+    let stoppedManual = false;
+
+    for (const acc of eligible) {
+      try {
+        setMessage(`Đang quét ${done + 1}/${eligible.length}: ${acc.email}…`);
+        await apmFetch(`/accounts/${acc.id}/scan-profile`, token, {
+          method: "POST",
+          body: "{}",
+        });
+
+        const deadline = Date.now() + 15 * 60_000;
+        while (Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 3000));
+          const list = await apmFetch<Account[]>("/accounts", token);
+          const cur = list.find((a) => a.id === acc.id);
+          if (!cur) break;
+          if (cur.profile?.status !== "QUEUED" && cur.profile?.status !== "RUNNING") break;
+        }
+        done += 1;
+        if (stoppedManual) break;
+        await new Promise((r) => setTimeout(r, 2000));
+      } catch (err) {
+        fails.push(`${acc.email}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    await load();
+    if (!stoppedManual) {
+      setMessage(`Đã quét hồ sơ ${done}/${eligible.length} tài khoản.`);
+    }
+    if (fails.length) setError(fails.slice(0, 3).join("; "));
+    setBulkBusy(false);
+  }
+
+  /** Quét hồ sơ Google (name + avatar) cho TẤT CẢ tài khoản READY. */
+  async function scanAllGoogleProfiles() {
+    if (!token) return;
+    const eligible = rows.filter((a) => accountIsReady(a));
+    if (!eligible.length) {
+      setError("Không có tài khoản nào ở trạng thái READY.");
+      return;
+    }
+    const ok = window.confirm(
+      `Quét hồ sơ Google (tên + avatar) cho TẤT CẢ ${eligible.length} tài khoản READY?\nChạy lần lượt — dừng nếu cần giải Verify it's you.`,
+    );
+    if (!ok) return;
+
+    setBulkBusy(true);
+    setError("");
+    setMessage("");
+    let done = 0;
+    const fails: string[] = [];
+    let stoppedManual = false;
+
+    for (const acc of eligible) {
+      try {
+        setMessage(`Đang quét ${done + 1}/${eligible.length}: ${acc.email}…`);
+        await apmFetch(`/accounts/${acc.id}/scan-profile`, token, {
+          method: "POST",
+          body: "{}",
+        });
+
+        const deadline = Date.now() + 15 * 60_000;
+        while (Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 3000));
+          const list = await apmFetch<Account[]>("/accounts", token);
+          const cur = list.find((a) => a.id === acc.id);
+          if (!cur) break;
+          if (cur.profile?.status !== "QUEUED" && cur.profile?.status !== "RUNNING") break;
+        }
+        done += 1;
+        if (stoppedManual) break;
+        await new Promise((r) => setTimeout(r, 2000));
+      } catch (err) {
+        fails.push(`${acc.email}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    await load();
+    if (!stoppedManual) {
+      setMessage(`Đã quét hồ sơ ${done}/${eligible.length} tài khoản.`);
+    }
+    if (fails.length) setError(fails.slice(0, 3).join("; "));
+    setBulkBusy(false);
+  }
+
   return (
     <div className="space-y-5">
       <AdminLiveBrowserSync
@@ -780,8 +1253,25 @@ export default function AdminAccountsPage() {
           >
             Dừng công việc
           </button>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            disabled={bulkBusy}
+            title="Quét tên + avatar Google của tất cả tài khoản READY"
+            onClick={() => void scanAllGoogleProfiles()}
+          >
+            Quét tất cả
+          </button>
           <button type="button" className="btn btn-secondary" onClick={openImport}>
             Nhập Excel
+          </button>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            title="Gán tên / địa chỉ / ảnh đại diện cho tài khoản đã chọn, ảnh lấy theo giới tính"
+            onClick={openAssignProfile}
+          >
+            Gán hồ sơ Excel
           </button>
           <button type="button" className="btn btn-primary" onClick={openAdd}>
             + Thêm email
@@ -840,6 +1330,168 @@ export default function AdminAccountsPage() {
         </div>
       )}
 
+      {panel === "assign-profile" && (
+        <div className="panel grid max-w-3xl gap-4 p-5">
+          <div>
+            <h2 className="font-display text-base font-semibold text-[var(--ink)]">
+              Gán hồ sơ từ Excel + thư mục ảnh
+            </h2>
+            <p className="mt-1 text-xs text-[var(--muted)]">
+              Excel cần cột <code>Họ tên</code>, <code>Giới tính</code> (Nam/Nữ),{" "}
+              <code>Địa chỉ</code>. Cột <code>Avatar</code> bị bỏ qua — ảnh lấy từ hai thư mục
+              theo giới tính, mỗi ảnh dùng một lần.
+            </p>
+          </div>
+
+          <input
+            ref={profileSheetRef}
+            type="file"
+            accept=".xlsx,.xls,.csv"
+            className="hidden"
+            onChange={(e) => void onPickProfileSheet(e.target.files?.[0] ?? null)}
+          />
+          <input
+            ref={maleDirRef}
+            type="file"
+            accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+            multiple
+            className="hidden"
+            onChange={(e) => onPickGenderImages("MALE", e.target.files)}
+          />
+          <input
+            ref={femaleDirRef}
+            type="file"
+            accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+            multiple
+            className="hidden"
+            onChange={(e) => onPickGenderImages("FEMALE", e.target.files)}
+          />
+
+          <div className="grid gap-2 sm:grid-cols-3">
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => profileSheetRef.current?.click()}
+            >
+              1. Chọn file Excel
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => maleDirRef.current?.click()}
+            >
+              2. Ảnh nam
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => femaleDirRef.current?.click()}
+            >
+              3. Ảnh nữ
+            </button>
+          </div>
+
+          <ul className="grid gap-1 text-sm text-[var(--ink-soft)]">
+            <li>
+              Excel:{" "}
+              {profileRows.length
+                ? `${profileFileName} — ${profileRows.length} hồ sơ`
+                : "chưa chọn"}
+            </li>
+            <li>Ảnh nam: {maleFiles.length || "chưa chọn"}</li>
+            <li>Ảnh nữ: {femaleFiles.length || "chưa chọn"}</li>
+            <li>
+              Tài khoản đang chọn:{" "}
+              <span className="font-semibold text-[var(--ink)]">{selectedCount}</span>
+            </li>
+          </ul>
+
+          {!selectedCount && (
+            <p className="rounded-[var(--radius-sm)] bg-[var(--warn-soft)] px-3 py-2 text-sm text-[var(--warn-ink)]">
+              Chọn tài khoản trong bảng bên dưới trước khi gán.
+            </p>
+          )}
+
+          {assignmentPlan.items.length > 0 && (
+            <>
+              <div className="rounded-[var(--radius-sm)] bg-[var(--surface-muted)] px-3 py-2 text-sm text-[var(--ink-soft)]">
+                Sẽ gán <b>{assignmentPlan.items.length}</b> tài khoản · có ảnh{" "}
+                <b>{assignmentPlan.withAvatar}</b> · không ảnh{" "}
+                <b>{assignmentPlan.items.length - assignmentPlan.withAvatar}</b>
+                {assignmentPlan.noGender > 0 &&
+                  ` · ${assignmentPlan.noGender} dòng thiếu giới tính`}
+                {assignmentPlan.unusedAccounts > 0 &&
+                  ` · ${assignmentPlan.unusedAccounts} tài khoản dư (thiếu dòng Excel)`}
+                {assignmentPlan.unusedRows > 0 &&
+                  ` · ${assignmentPlan.unusedRows} dòng Excel dư`}
+              </div>
+              <div className="max-h-56 overflow-auto rounded-[var(--radius-sm)] border border-[var(--line)] text-xs">
+                <table className="data-table !text-xs">
+                  <thead>
+                    <tr>
+                      <th>#</th>
+                      <th>Email</th>
+                      <th>Họ tên</th>
+                      <th>Giới tính</th>
+                      <th>Địa chỉ</th>
+                      <th>Ảnh</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {assignmentPlan.items.slice(0, 30).map((item, i) => (
+                      <tr key={item.account.id}>
+                        <td>{i + 1}</td>
+                        <td>{item.account.email}</td>
+                        <td>{item.row.name || "—"}</td>
+                        <td>
+                          {item.row.gender === "MALE"
+                            ? "Nam"
+                            : item.row.gender === "FEMALE"
+                              ? "Nữ"
+                              : "—"}
+                        </td>
+                        <td>{item.row.address || "—"}</td>
+                        <td>{item.file?.name || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {assignmentPlan.items.length > 30 && (
+                  <p className="px-2 py-1 text-[var(--muted)]">
+                    … và {assignmentPlan.items.length - 30} dòng nữa
+                  </p>
+                )}
+              </div>
+            </>
+          )}
+
+          {assignProgress && (
+            <p className="text-sm text-[var(--ink-soft)]">{assignProgress}</p>
+          )}
+
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={bulkBusy || !assignmentPlan.items.length}
+              onClick={() => void applyProfileAssignment()}
+            >
+              {bulkBusy
+                ? "Đang gán…"
+                : `Gán ${assignmentPlan.items.length || ""}`.trim()}
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={bulkBusy}
+              onClick={closePanel}
+            >
+              Đóng
+            </button>
+          </div>
+        </div>
+      )}
+
       {panel === "import" && (
         <form onSubmit={submitImport} className="panel grid max-w-2xl gap-3 p-5">
           <div>
@@ -847,8 +1499,8 @@ export default function AdminAccountsPage() {
               Nhập Excel / CSV
             </h2>
             <p className="mt-1 text-xs text-[var(--muted)]">
-              Đúng 3 cột: <code>tk</code> (email), <code>mk</code> (mật khẩu),{" "}
-              <code>2fa</code> (tuỳ chọn).
+              Cột bắt buộc: <code>tk</code>, <code>mk</code>. Tuỳ chọn:{" "}
+              <code>2fa</code>, <code>ten</code>, <code>diachi</code>, <code>avatar</code>.
             </p>
           </div>
           <input
@@ -889,6 +1541,8 @@ export default function AdminAccountsPage() {
                     <th>tk</th>
                     <th>mk</th>
                     <th>2fa</th>
+                    <th>ten</th>
+                    <th>avatar</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -898,6 +1552,8 @@ export default function AdminAccountsPage() {
                       <td>{r.email || "—"}</td>
                       <td>{r.password ? "••••••" : "—"}</td>
                       <td>{r.totpSecret ? "Có" : "Không"}</td>
+                      <td>{r.desiredName || "—"}</td>
+                      <td>{r.desiredAvatarUrl ? "Có" : "—"}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -924,6 +1580,14 @@ export default function AdminAccountsPage() {
               onChange={(e) => setImportAutoAssign(e.target.checked)}
             />
             Sau nhập: tự gán hồ sơ trên server (thoát Admin vẫn tiếp tục chạy)
+          </label>
+          <label className="flex items-center gap-2 text-sm text-[var(--ink-soft)]">
+            <input
+              type="checkbox"
+              checked={importApplyProfile}
+              onChange={(e) => setImportApplyProfile(e.target.checked)}
+            />
+            Sau login READY: tự áp dụng hồ sơ Google (tên/avatar/địa chỉ từ Excel)
           </label>
           <div className="flex flex-wrap gap-2">
             <button
@@ -1153,6 +1817,36 @@ export default function AdminAccountsPage() {
                 <span className="font-semibold text-[var(--ink)]">{selectedCount}</span> tài khoản
               </p>
               <div className="flex flex-wrap gap-2">
+                <input
+                  ref={avatarFileRef}
+                  type="file"
+                  accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+                  multiple={selectedCount > 1}
+                  className="hidden"
+                  onChange={(e) => void uploadSelectedAvatars(e.target.files)}
+                />
+                <button
+                  type="button"
+                  className="btn btn-secondary !py-1.5 text-xs"
+                  disabled={bulkBusy}
+                  title={
+                    selectedCount === 1
+                      ? "Chọn một file JPG/PNG/WebP (tối đa 8MB)"
+                      : "Chọn nhiều file; mỗi tên file phải bằng email, ví dụ abc@gmail.com.jpg"
+                  }
+                  onClick={() => avatarFileRef.current?.click()}
+                >
+                  {bulkBusy ? "…" : "Upload avatar"}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary !py-1.5 text-xs"
+                  disabled={bulkBusy}
+                  title="Đổi tên / avatar / địa chỉ trên Google (acc READY + có dữ liệu Excel)"
+                  onClick={() => void bulkProfileUpdate()}
+                >
+                  {bulkBusy ? "…" : "Đổi hồ sơ Google"}
+                </button>
                 <button
                   type="button"
                   className="btn btn-secondary !py-1.5 text-xs"
@@ -1186,6 +1880,15 @@ export default function AdminAccountsPage() {
                 >
                   Bỏ chọn
                 </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary !py-1.5 text-xs"
+                  disabled={bulkBusy || !selectedAccounts.length}
+                  title="Quét tên + avatar Google thực tế từ myaccount.google.com"
+                  onClick={() => void bulkScanGoogleProfile()}
+                >
+                  {bulkBusy ? "…" : "Quét hồ sơ"}
+                </button>
               </div>
             </div>
           )}
@@ -1210,6 +1913,9 @@ export default function AdminAccountsPage() {
                   <th className="w-14 whitespace-nowrap">STT</th>
                   <th>Email</th>
                   <th>2FA</th>
+                  <th>Tên Google</th>
+                  <th>Avatar</th>
+                  <th>Hồ sơ Google</th>
                   <th>Trạng thái đăng nhập</th>
                   <th>Trình duyệt</th>
                   <th className="sticky-actions-col whitespace-nowrap">Thao tác nhanh</th>
@@ -1246,6 +1952,63 @@ export default function AdminAccountsPage() {
                         ) : (
                           <span className="text-xs text-[var(--muted)]">Không</span>
                         )}
+                      </td>
+                      <td>
+                        {r.googleName ? (
+                          <div
+                            className="truncate max-w-[120px] text-xs font-medium text-[var(--ink)]"
+                            title={r.googleName}
+                          >
+                            {r.googleName}
+                          </div>
+                        ) : (
+                          <span className="text-xs text-[var(--muted)]">—</span>
+                        )}
+                      </td>
+                      <td>
+                        {r.googleAvatar ? (
+                          <div className="flex items-center justify-center">
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img
+                              src={r.googleAvatar}
+                              alt="avatar"
+                              className="h-8 w-8 rounded-full object-cover border border-[var(--line)]"
+                              onError={(e) => {
+                                (e.target as HTMLImageElement).style.display = "none";
+                              }}
+                            />
+                          </div>
+                        ) : r.avatarLocalPath ? (
+                          <span
+                            className="text-xs text-[var(--muted)]"
+                            title={r.avatarLocalPath}
+                          >
+                            file ✓
+                          </span>
+                        ) : (
+                          <span className="text-xs text-[var(--muted)]">—</span>
+                        )}
+                      </td>
+                      <td>
+                        <div className="text-xs">
+                          {accountHasDesiredProfile(r) ? (
+                            <>
+                              {r.desiredName && (
+                                <div className="truncate max-w-[140px]" title={r.desiredName}>
+                                  {r.desiredName}
+                                </div>
+                              )}
+                              {!r.desiredName && r.avatarLocalPath && (
+                                <div>Đã có file avatar</div>
+                              )}
+                              <div className="text-[var(--muted)]">
+                                {profileSyncLabel(r.profileSyncStatus, r.profileSyncError)}
+                              </div>
+                            </>
+                          ) : (
+                            <span className="text-[var(--muted)]">—</span>
+                          )}
+                        </div>
                       </td>
                       <td>
                         <StatusLight value={statusLabel} kind="status" />
@@ -1321,7 +2084,7 @@ export default function AdminAccountsPage() {
                 })}
                 {!rows.length && (
                   <tr>
-                    <td colSpan={7} className="!py-10 text-center text-[var(--muted)]">
+                    <td colSpan={9} className="!py-10 text-center text-[var(--muted)]">
                       Chưa có tài khoản — bấm Thêm email
                     </td>
                   </tr>

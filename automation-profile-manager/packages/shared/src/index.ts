@@ -56,7 +56,21 @@ export const TaskCode = {
   MAPS_REVIEW: "MAPS_REVIEW",
   /** Xóa review đã đăng trên Maps (đúng account đã post). */
   MAPS_DELETE_REVIEW: "MAPS_DELETE_REVIEW",
+  /** Đổi tên / avatar / địa chỉ trên myaccount.google.com. */
+  ACCOUNT_PROFILE_UPDATE: "ACCOUNT_PROFILE_UPDATE",
+  /** Quét tên + avatar thực tế từ myaccount.google.com. */
+  SCAN_GOOGLE_PROFILE: "SCAN_GOOGLE_PROFILE",
 } as const;
+
+export const ProfileSyncStatus = {
+  PENDING: "PENDING",
+  SYNCING: "SYNCING",
+  SYNCED: "SYNCED",
+  NEEDS_MANUAL: "NEEDS_MANUAL",
+  FAILED: "FAILED",
+} as const;
+export type ProfileSyncStatus =
+  (typeof ProfileSyncStatus)[keyof typeof ProfileSyncStatus];
 export type TaskCode = (typeof TaskCode)[keyof typeof TaskCode];
 
 export const mapsReviewPayloadSchema = z.object({
@@ -82,6 +96,29 @@ export type MapsDeleteReviewPayload = z.infer<
   typeof mapsDeleteReviewPayloadSchema
 >;
 
+export const accountProfileUpdatePayloadSchema = z.object({
+  accountId: z.string().uuid(),
+  desiredName: z.string().max(200).optional().nullable(),
+  desiredAddress: z.string().max(500).optional().nullable(),
+  /** Path tuyệt đối hoặc tương đối tới file avatar đã chuẩn hóa. */
+  avatarLocalPath: z.string().max(1000).optional().nullable(),
+  /** Cập nhật từng phần — mặc định cả 3 nếu có dữ liệu. */
+  updateName: z.boolean().optional(),
+  updateAvatar: z.boolean().optional(),
+  updateAddress: z.boolean().optional(),
+});
+export type AccountProfileUpdatePayload = z.infer<
+  typeof accountProfileUpdatePayloadSchema
+>;
+
+/** Payload cho SCAN_GOOGLE_PROFILE — chỉ cần accountId để update lại DB. */
+export const scanGoogleProfilePayloadSchema = z.object({
+  accountId: z.string().uuid(),
+});
+export type ScanGoogleProfilePayload = z.infer<
+  typeof scanGoogleProfilePayloadSchema
+>;
+
 export type ProfileTaskJob = {
   profileId: string;
   taskCode: TaskCode;
@@ -90,6 +127,8 @@ export type ProfileTaskJob = {
   payload?:
     | MapsReviewPayload
     | MapsDeleteReviewPayload
+    | AccountProfileUpdatePayload
+    | ScanGoogleProfilePayload
     | Record<string, unknown>
     | null;
 };
@@ -173,6 +212,8 @@ export const enqueueTaskSchema = z.object({
       "BROWSER_CHECK",
       "MAPS_REVIEW",
       "MAPS_DELETE_REVIEW",
+      "ACCOUNT_PROFILE_UPDATE",
+      "SCAN_GOOGLE_PROFILE",
     ])
     .default("HEALTHCHECK"),
   /** Validate theo task trong ProfilesService.enqueue */

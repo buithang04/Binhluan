@@ -6,8 +6,10 @@ import {
 import {
   createProfileSchema,
   enqueueTaskSchema,
+  accountProfileUpdatePayloadSchema,
   mapsDeleteReviewPayloadSchema,
   mapsReviewPayloadSchema,
+  scanGoogleProfilePayloadSchema,
   TaskCode,
   type ProfileTaskJob,
 } from "@apm/shared";
@@ -279,6 +281,18 @@ export class ProfilesService {
       }
       payload = mapsDeleteReviewPayloadSchema.parse(payload);
     }
+    if (taskCode === "ACCOUNT_PROFILE_UPDATE") {
+      if (!payload) {
+        throw new BadRequestException("ACCOUNT_PROFILE_UPDATE requires payload");
+      }
+      payload = accountProfileUpdatePayloadSchema.parse(payload);
+    }
+    if (taskCode === "SCAN_GOOGLE_PROFILE") {
+      if (!payload) {
+        throw new BadRequestException("SCAN_GOOGLE_PROFILE requires payload");
+      }
+      payload = scanGoogleProfilePayloadSchema.parse(payload);
+    }
     const profile = await this.get(id);
     if (profile.status === "DISABLED") {
       throw new BadRequestException("Profile is disabled");
@@ -298,7 +312,9 @@ export class ProfilesService {
           ? 30 * 60 * 1000
           : taskCode === "MAPS_DELETE_REVIEW"
             ? 15 * 60 * 1000
-            : 5 * 60 * 1000;
+            : taskCode === "ACCOUNT_PROFILE_UPDATE" || taskCode === "SCAN_GOOGLE_PROFILE"
+              ? 15 * 60 * 1000
+              : 5 * 60 * 1000;
     const leaseUntil = new Date(Date.now() + leaseMs);
 
     const jobRun = await this.prisma.$transaction(async (tx) => {

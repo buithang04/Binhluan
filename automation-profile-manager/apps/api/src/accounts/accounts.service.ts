@@ -3,10 +3,18 @@ import { existsSync } from "fs";
 import { rm } from "fs/promises";
 import path from "path";
 import { decryptSecret, encryptSecret } from "@apm/crypto";
-import { createAccountSchema, normalizeTotpSecret } from "@apm/shared";
+import {
+  accountProfileUpdatePayloadSchema,
+  createAccountSchema,
+  normalizeTotpSecret,
+} from "@apm/shared";
 import { z } from "zod";
 import { PrismaService } from "../prisma/prisma.service";
 import { ProfilesService } from "../profiles/profiles.service";
+import {
+  cacheAccountAvatarFromUrl,
+  cacheUploadedAccountAvatar,
+} from "./avatar-cache";
 
 function tryDecrypt(payload: unknown): string | null {
   if (!payload) return null;
@@ -30,6 +38,28 @@ function accountPublic<T extends { passwordEnc?: unknown; totpSecretEnc?: unknow
     hasPassword: Boolean(passwordEnc),
     hasTotp: Boolean(totpSecretEnc),
   };
+}
+
+/** NFD không tách đ/Đ — phải map tay, nếu không "Địa chỉ" thành "iachi". */
+function normFieldKey(raw: unknown): string {
+  return String(raw ?? "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .replace(/đ/g, "d")
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+function pickProfileField(raw: Record<string, unknown>, keys: string[]): string | null {
+  for (const key of keys) {
+    const norm = normFieldKey(key);
+    for (const [k, v] of Object.entries(raw)) {
+      if (normFieldKey(k) === norm && v != null && String(v).trim()) {
+        return String(v).trim();
+      }
+    }
+  }
+  return null;
 }
 
 function totpEncFromInput(totpSecret?: string | null) {
@@ -85,12 +115,33 @@ export class AccountsService {
     });
     // Ghép loginIssue (cột mới — raw nếu Prisma client chưa regenerate)
     const extras = await this.prisma.$queryRaw<
-      Array<{ id: string; loginIssue: string | null }>
-    >`SELECT id, "loginIssue" FROM "GoogleAccount"`;
-    const issueById = new Map(extras.map((e) => [e.id, e.loginIssue]));
+      Array<{
+        id: string;
+        loginIssue: string | null;
+        desiredName: string | null;
+        desiredAddress: string | null;
+        desiredAvatarUrl: string | null;
+        avatarLocalPath: string | null;
+        profileSyncStatus: string | null;
+        profileSyncError: string | null;
+        profileSyncedAt: Date | null;
+        googleName: string | null;
+        googleAvatar: string | null;
+      }>
+    >`SELECT id, "loginIssue", "desiredName", "desiredAddress", "desiredAvatarUrl", "avatarLocalPath", "profileSyncStatus", "profileSyncError", "profileSyncedAt", "googleName", "googleAvatar" FROM "GoogleAccount"`;
+    const extraById = new Map(extras.map((e) => [e.id, e]));
     return rows.map((r) => ({
       ...accountPublic(r),
-      loginIssue: issueById.get(r.id) ?? null,
+      loginIssue: extraById.get(r.id)?.loginIssue ?? null,
+      desiredName: extraById.get(r.id)?.desiredName ?? null,
+      desiredAddress: extraById.get(r.id)?.desiredAddress ?? null,
+      desiredAvatarUrl: extraById.get(r.id)?.desiredAvatarUrl ?? null,
+      avatarLocalPath: extraById.get(r.id)?.avatarLocalPath ?? null,
+      profileSyncStatus: extraById.get(r.id)?.profileSyncStatus ?? null,
+      profileSyncError: extraById.get(r.id)?.profileSyncError ?? null,
+      profileSyncedAt: extraById.get(r.id)?.profileSyncedAt ?? null,
+      googleName: extraById.get(r.id)?.googleName ?? null,
+      googleAvatar: extraById.get(r.id)?.googleAvatar ?? null,
     }));
   }
 
@@ -131,12 +182,23 @@ export class AccountsService {
       recoveryEmail?: string | null;
       recoveryPhone?: string | null;
       totpSecret?: string | null;
+      desiredName?: string | null;
+      desiredAddress?: string | null;
+      desiredAvatarUrl?: string | null;
+      name?: string | null;
+      address?: string | null;
+      avatar?: string | null;
+      avatarUrl?: string | null;
       /** aliases */
       "2fa"?: string | null;
       totp?: string | null;
+      ten?: string | null;
+      diachi?: string | null;
     }>;
     updateExisting?: boolean;
     autoAssignAfterImport?: boolean;
+    /** Sau login thành công — enqueue đổi hồ sơ Google (mặc định tắt). */
+    applyProfileAfterImport?: boolean;
   }) {
     const rows = Array.isArray(input?.accounts) ? input.accounts : [];
     if (!rows.length) {
@@ -170,6 +232,27 @@ export class AccountsService {
       const totpRaw = String(
         raw.totpSecret || raw["2fa"] || raw.totp || "",
       ).trim();
+      const desiredName =
+        pickProfileField(raw as Record<string, unknown>, [
+          "desiredName",
+          "name",
+          "ten",
+        ]) || null;
+      const desiredAddress =
+        pickProfileField(raw as Record<string, unknown>, [
+          "desiredAddress",
+          "address",
+          "diachi",
+        ]) || null;
+      const desiredAvatarUrl =
+        pickProfileField(raw as Record<string, unknown>, [
+          "desiredAvatarUrl",
+          "avatarUrl",
+          "avatar",
+        ]) || null;
+      const hasProfileDesired = Boolean(
+        desiredName || desiredAddress || desiredAvatarUrl,
+      );
 
       if (!email) {
         errors.push({ row: i + 1, error: "Thiếu email" });
@@ -203,8 +286,26 @@ export class AccountsService {
                 ...(recoveryEmail ? { recoveryEmail } : {}),
                 ...(recoveryPhone ? { recoveryPhone } : {}),
                 ...(totpSecretEnc ? { totpSecretEnc } : {}),
+                ...(desiredName ? { desiredName } : {}),
+                ...(desiredAddress ? { desiredAddress } : {}),
+                ...(desiredAvatarUrl ? { desiredAvatarUrl } : {}),
+                ...(hasProfileDesired ? { profileSyncStatus: "PENDING" as const } : {}),
               },
             });
+            if (desiredAvatarUrl) {
+              try {
+                const avatarLocalPath = await cacheAccountAvatarFromUrl(
+                  existing.id,
+                  desiredAvatarUrl,
+                );
+                await this.prisma.googleAccount.update({
+                  where: { id: existing.id },
+                  data: { avatarLocalPath },
+                });
+              } catch {
+                /* avatar cache optional on import */
+              }
+            }
             updated.push({ id: existing.id, email });
           } else {
             skipped.push({ email, reason: "đã tồn tại" });
@@ -234,8 +335,26 @@ export class AccountsService {
             recoveryEmail: parsed.recoveryEmail ?? null,
             recoveryPhone: parsed.recoveryPhone ?? null,
             status: "UNREADY",
+            ...(desiredName ? { desiredName } : {}),
+            ...(desiredAddress ? { desiredAddress } : {}),
+            ...(desiredAvatarUrl ? { desiredAvatarUrl } : {}),
+            ...(hasProfileDesired ? { profileSyncStatus: "PENDING" as const } : {}),
           },
         });
+        if (desiredAvatarUrl) {
+          try {
+            const avatarLocalPath = await cacheAccountAvatarFromUrl(
+              row.id,
+              desiredAvatarUrl,
+            );
+            await this.prisma.googleAccount.update({
+              where: { id: row.id },
+              data: { avatarLocalPath },
+            });
+          } catch {
+            /* avatar cache optional on import */
+          }
+        }
         created.push({ id: row.id, email: row.email });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -245,6 +364,9 @@ export class AccountsService {
 
     let autoAssigned = 0;
     const autoAssignErrors: Array<{ accountId: string; email: string; error: string }> = [];
+    let profileQueued = 0;
+    const profileQueueErrors: Array<{ accountId: string; email: string; error: string }> = [];
+
     if (input.autoAssignAfterImport && created.length > 0) {
       for (let i = 0; i < created.length; i++) {
         const acc = created[i]!;
@@ -253,6 +375,34 @@ export class AccountsService {
           autoAssigned += 1;
         } catch (e) {
           autoAssignErrors.push({
+            accountId: acc.id,
+            email: acc.email,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+      }
+    }
+
+    if (input.applyProfileAfterImport) {
+      const targets = [...created, ...updated];
+      for (const acc of targets) {
+        try {
+          const row = await this.prisma.googleAccount.findUnique({
+            where: { id: acc.id },
+            include: { profile: true },
+          });
+          if (!row?.profile) continue;
+          if (row.status !== "READY" && row.profile.status !== "READY") continue;
+          if (
+            !row.desiredName &&
+            !row.desiredAddress &&
+            !row.desiredAvatarUrl &&
+            !row.avatarLocalPath
+          ) continue;
+          await this.enqueueProfileUpdate(acc.id);
+          profileQueued += 1;
+        } catch (e) {
+          profileQueueErrors.push({
             accountId: acc.id,
             email: acc.email,
             error: e instanceof Error ? e.message : String(e),
@@ -274,12 +424,300 @@ export class AccountsService {
       autoAssigned,
       autoAssignFailed: autoAssignErrors.length,
       autoAssignErrors: autoAssignErrors.slice(0, 20),
+      profileQueued,
+      profileQueueFailed: profileQueueErrors.length,
+      profileQueueErrors: profileQueueErrors.slice(0, 20),
       message: `Import xong: +${created.length} mới, ${updated.length} cập nhật, ${skipped.length} bỏ qua, ${errors.length} lỗi${
         input.autoAssignAfterImport
           ? ` · Auto-gán hồ sơ: ${autoAssigned}/${created.length}`
           : ""
+      }${
+        input.applyProfileAfterImport
+          ? ` · Đổi hồ sơ Google: ${profileQueued} acc`
+          : ""
       }`,
     };
+  }
+
+  /** Chuẩn bị payload + enqueue ACCOUNT_PROFILE_UPDATE cho 1 account READY. */
+  async enqueueProfileUpdate(accountId: string) {
+    const row = await this.prisma.googleAccount.findUnique({
+      where: { id: accountId },
+      include: { profile: true },
+    });
+    if (!row) throw new NotFoundException("Account not found");
+    if (!row.profile) {
+      throw new BadRequestException("Account chưa có Chrome profile — gán hồ sơ trước");
+    }
+    if (row.status !== "READY" || row.profile.status !== "READY") {
+      throw new BadRequestException("Account chưa READY — đăng nhập Google trước");
+    }
+    if (
+      !row.desiredName &&
+      !row.desiredAddress &&
+      !row.desiredAvatarUrl &&
+      !row.avatarLocalPath
+    ) {
+      throw new BadRequestException("Không có tên/địa chỉ/avatar mong muốn");
+    }
+
+    let avatarLocalPath = row.avatarLocalPath;
+    if (row.desiredAvatarUrl) {
+      try {
+        avatarLocalPath = await cacheAccountAvatarFromUrl(accountId, row.desiredAvatarUrl);
+        await this.prisma.googleAccount.update({
+          where: { id: accountId },
+          data: { avatarLocalPath },
+        });
+      } catch (e) {
+        throw new BadRequestException(
+          `Tải avatar thất bại: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    }
+
+    const payload = accountProfileUpdatePayloadSchema.parse({
+      accountId,
+      desiredName: row.desiredName,
+      desiredAddress: row.desiredAddress,
+      avatarLocalPath,
+    });
+
+    await this.prisma.googleAccount.update({
+      where: { id: accountId },
+      data: {
+        profileSyncStatus: "SYNCING",
+        profileSyncError: null,
+      },
+    });
+
+    return this.profiles.enqueue(row.profile.id, {
+      taskCode: "ACCOUNT_PROFILE_UPDATE",
+      payload,
+    });
+  }
+
+  /** Enqueue đổi hồ sơ Google hàng loạt — 1 acc / lần (client gọi tuần tự). */
+  async bulkEnqueueProfileUpdate(accountIds: string[]) {
+    const ids = [...new Set(accountIds.map((id) => String(id).trim()).filter(Boolean))];
+    if (!ids.length) {
+      throw new BadRequestException("Danh sách account trống");
+    }
+    if (ids.length > 200) {
+      throw new BadRequestException("Tối đa 200 account / lần");
+    }
+
+    const queued: Array<{ accountId: string; email: string; jobRunId: string }> = [];
+    const errors: Array<{ accountId: string; email?: string; error: string }> = [];
+
+    for (const accountId of ids) {
+      const row = await this.prisma.googleAccount.findUnique({
+        where: { id: accountId },
+        select: { email: true },
+      });
+      try {
+        const out = await this.enqueueProfileUpdate(accountId);
+        queued.push({
+          accountId,
+          email: row?.email ?? accountId,
+          jobRunId: out.jobRunId,
+        });
+      } catch (e) {
+        errors.push({
+          accountId,
+          email: row?.email,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+
+    return {
+      ok: true,
+      queued: queued.length,
+      failed: errors.length,
+      queuedRows: queued,
+      errors: errors.slice(0, 50),
+    };
+  }
+
+  /** Lưu tên / địa chỉ mong muốn hàng loạt (gán hồ sơ từ Excel, chưa chạy Google). */
+  async bulkSetDesiredProfile(
+    items: Array<{
+      accountId?: string;
+      desiredName?: string | null;
+      desiredAddress?: string | null;
+    }>,
+  ) {
+    const rows = Array.isArray(items) ? items : [];
+    if (!rows.length) throw new BadRequestException("Danh sách hồ sơ trống");
+    if (rows.length > 500) {
+      throw new BadRequestException("Tối đa 500 hồ sơ / lần");
+    }
+
+    const updated: Array<{ accountId: string; email: string }> = [];
+    const errors: Array<{ accountId?: string; error: string }> = [];
+
+    for (const item of rows) {
+      const accountId = String(item?.accountId || "").trim();
+      if (!accountId) {
+        errors.push({ error: "Thiếu accountId" });
+        continue;
+      }
+      const desiredName = item.desiredName?.trim() || null;
+      const desiredAddress = item.desiredAddress?.trim() || null;
+      if (!desiredName && !desiredAddress) {
+        errors.push({ accountId, error: "Không có tên / địa chỉ" });
+        continue;
+      }
+      try {
+        const row = await this.prisma.googleAccount.update({
+          where: { id: accountId },
+          data: {
+            desiredName,
+            desiredAddress,
+            profileSyncStatus: "PENDING",
+            profileSyncError: null,
+            profileSyncedAt: null,
+          },
+          select: { id: true, email: true },
+        });
+        updated.push({ accountId: row.id, email: row.email });
+      } catch (e) {
+        errors.push({
+          accountId,
+          error: e instanceof Error ? e.message.slice(0, 200) : String(e),
+        });
+      }
+    }
+
+    return {
+      ok: true,
+      updated: updated.length,
+      failed: errors.length,
+      updatedRows: updated,
+      errors: errors.slice(0, 50),
+      message: `Đã lưu hồ sơ cho ${updated.length} tài khoản${
+        errors.length ? `, ${errors.length} lỗi` : ""
+      }`,
+    };
+  }
+
+  /** Enqueue quét hồ sơ Google (name + avatar) cho 1 account READY. */
+  async enqueueScanGoogleProfile(accountId: string) {
+    const row = await this.prisma.googleAccount.findUnique({
+      where: { id: accountId },
+      include: { profile: true },
+    });
+    if (!row) throw new NotFoundException("Account not found");
+    if (!row.profile) {
+      throw new BadRequestException("Account chưa có Chrome profile — gán hồ sơ trước");
+    }
+    if (row.status !== "READY" || row.profile.status !== "READY") {
+      throw new BadRequestException("Account chưa READY — đăng nhập Google trước");
+    }
+    const payload = { accountId };
+    return this.profiles.enqueue(row.profile.id, {
+      taskCode: "SCAN_GOOGLE_PROFILE",
+      payload,
+    });
+  }
+
+  /** Enqueue quét hồ sơ Google hàng loạt — 1 acc / lần (client gọi tuần tự). */
+  async bulkEnqueueScanGoogleProfile(accountIds: string[]) {
+    const ids = [...new Set(accountIds.map((id) => String(id).trim()).filter(Boolean))];
+    if (!ids.length) {
+      throw new BadRequestException("Danh sách account trống");
+    }
+    if (ids.length > 200) {
+      throw new BadRequestException("Tối đa 200 account / lần");
+    }
+
+    const queued: Array<{ accountId: string; email: string; jobRunId: string }> = [];
+    const errors: Array<{ accountId: string; email?: string; error: string }> = [];
+
+    for (const accountId of ids) {
+      const row = await this.prisma.googleAccount.findUnique({
+        where: { id: accountId },
+        select: { email: true, status: true, profile: { select: { status: true } } },
+      });
+      try {
+        const out = await this.enqueueScanGoogleProfile(accountId);
+        queued.push({
+          accountId,
+          email: row?.email ?? accountId,
+          jobRunId: out.jobRunId,
+        });
+      } catch (e) {
+        errors.push({
+          accountId,
+          email: row?.email,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+
+    return {
+      ok: true,
+      queued: queued.length,
+      failed: errors.length,
+      queuedRows: queued,
+      errors: errors.slice(0, 50),
+    };
+  }
+
+  /** Nhận ảnh local dạng base64 từ Admin và gắn làm avatar mong muốn. */
+  async uploadAvatar(
+    accountId: string,
+    input: { fileName?: string; dataBase64?: string },
+  ) {
+    const account = await this.prisma.googleAccount.findUnique({
+      where: { id: accountId },
+      select: { id: true, email: true },
+    });
+    if (!account) throw new NotFoundException("Account not found");
+
+    const encoded = String(input?.dataBase64 || "").trim();
+    if (!encoded) throw new BadRequestException("Thiếu dữ liệu file avatar");
+    if (encoded.length > 11_200_000) {
+      throw new BadRequestException("File avatar > 8MB");
+    }
+
+    let data: Buffer;
+    try {
+      data = Buffer.from(encoded, "base64");
+    } catch {
+      throw new BadRequestException("Dữ liệu file avatar không hợp lệ");
+    }
+    if (!data.length || data.toString("base64").replace(/=+$/, "") !== encoded.replace(/=+$/, "")) {
+      throw new BadRequestException("Dữ liệu base64 không hợp lệ");
+    }
+
+    try {
+      const avatarLocalPath = await cacheUploadedAccountAvatar(accountId, data);
+      await this.prisma.googleAccount.update({
+        where: { id: accountId },
+        data: {
+          avatarLocalPath,
+          // File upload trực tiếp được ưu tiên; không tải lại URL cũ khi enqueue.
+          desiredAvatarUrl: null,
+          profileSyncStatus: "PENDING",
+          profileSyncError: null,
+          profileSyncedAt: null,
+        },
+      });
+      return {
+        ok: true,
+        accountId,
+        email: account.email,
+        fileName: String(input.fileName || "").slice(0, 255),
+        size: data.length,
+        message: `Đã lưu avatar cho ${account.email}`,
+      };
+    } catch (e) {
+      throw new BadRequestException(
+        e instanceof Error ? e.message : String(e),
+      );
+    }
   }
 
   async update(id: string, input: Partial<z.infer<typeof createAccountSchema>>) {

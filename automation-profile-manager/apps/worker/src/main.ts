@@ -15,12 +15,15 @@ import {
   BrowserControlJob,
   mapsReviewPayloadSchema,
   mapsDeleteReviewPayloadSchema,
+  accountProfileUpdatePayloadSchema,
+  scanGoogleProfilePayloadSchema,
 } from "@apm/shared";
 import { browserPool } from "./browser-pool";
 import { HumanCursor } from "./humanize";
 import { applyStealth } from "./stealth";
 import { postMapsReview, assertGoogleSessionForMaps } from "./maps-review";
 import { deleteMapsReview } from "./maps-delete-review";
+import { updateGoogleProfile, scanGoogleProfile } from "./google-profile-update.js";
 import {
   attachProxyAuthToPage,
   assertProxyBeforeMaps,
@@ -2704,6 +2707,7 @@ async function runMapsReviewJob(
   if (!claim.proxy) {
     throw new Error("MAPS_REVIEW requires a locked proxy (job.proxyId)");
   }
+  let jobProxy: NonNullable<ClaimPayload["proxy"]> = claim.proxy;
 
   /**
    * Luồng chuẩn MAPS_REVIEW:
@@ -2754,11 +2758,11 @@ async function runMapsReviewJob(
     chromePid = live.pid;
     reused = true;
     mode = "pool";
-    usingJobProxy = Boolean(live.proxyEnabled) && live.proxyId === claim.proxy.id;
+    usingJobProxy = Boolean(live.proxyEnabled) && live.proxyId === jobProxy.id;
     if (!usingJobProxy) {
       const cli = await readChromeProxyFromProfileDir(profilePath);
       usingJobProxy = Boolean(
-        cli && cli.host === claim.proxy.host && cli.port === claim.proxy.port,
+        cli && cli.host === jobProxy.host && cli.port === jobProxy.port,
       );
     }
     console.log(
@@ -2877,7 +2881,7 @@ async function runMapsReviewJob(
     reused = false;
     usingJobProxy = useProxy;
     if (useProxy) {
-      await bindProxyAuthToBrowser(browser, claim.proxy);
+      await bindProxyAuthToBrowser(browser, jobProxy);
       page = await setupPage(browser, claim, { useProxy: true });
     } else {
       page = await setupPage(browser, claim, { useProxy: false });
@@ -2904,19 +2908,19 @@ async function runMapsReviewJob(
   let gate: Awaited<ReturnType<typeof assertProxyBeforeMaps>> | null = null;
   for (let proxyTry = 0; proxyTry < maxProxyTries; proxyTry++) {
     if (proxyTry > 0) {
-      if (!claim.proxy) throw new Error("MAPS thiếu proxy");
-      const swapped = await api<{ proxy: NonNullable<ClaimPayload["proxy"]> }>(
+      const swapped: { proxy: NonNullable<ClaimPayload["proxy"]> } = await api(
         "/internal/jobs/reswap-proxy",
         {
           profileId: claim.profile.id,
           leaseToken: job.leaseToken,
           jobRunId: job.jobRunId,
-          failedProxyId: claim.proxy.id,
+          failedProxyId: jobProxy.id,
         },
       );
+      jobProxy = swapped.proxy;
       claim.proxy = swapped.proxy;
       console.log(
-        `[worker] MAPS_REVIEW #${claim.profile.browserIndex} proxy retry ${proxyTry + 1}/${maxProxyTries} → ${claim.proxy.host}:${claim.proxy.port}`,
+        `[worker] MAPS_REVIEW #${claim.profile.browserIndex} proxy retry ${proxyTry + 1}/${maxProxyTries} → ${jobProxy.host}:${jobProxy.port}`,
       );
     }
     await relaunchMapsChrome(
@@ -2928,7 +2932,7 @@ async function runMapsReviewJob(
       `[worker] MAPS_REVIEW #${claim.profile.browserIndex} bước3 kiểm tra proxy (${claim.proxy?.host}:${claim.proxy?.port})…`,
     );
     try {
-      gate = await assertProxyBeforeMaps(page, claim.proxy);
+      gate = await assertProxyBeforeMaps(page, jobProxy);
       break;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -3000,7 +3004,7 @@ async function runMapsReviewJob(
     browserIndex: claim.profile.browserIndex,
     browser,
     page,
-    proxyId: claim.proxy.id,
+    proxyId: jobProxy.id,
     cookiePath: claim.profile.cookiePath,
     browserProfilePath: claim.profile.browserProfilePath,
     openedAt: new Date(),
@@ -3010,15 +3014,15 @@ async function runMapsReviewJob(
     proxyEnabled: true,
     mapsReviewInProgress: true,
     proxyAuth:
-      claim.proxy.username && claim.proxy.password
-        ? { username: claim.proxy.username, password: claim.proxy.password }
+      jobProxy.username && jobProxy.password
+        ? { username: jobProxy.username, password: jobProxy.password }
         : null,
   });
 
   // Không enforceMaxTabs ở đây — Maps sẽ tạo target; limiter đã no-op khi mapsReviewInProgress
   const browserVersion = await browser.version();
   console.log(
-    `[worker] MAPS_REVIEW #${claim.profile.browserIndex} ${claim.account.email} rating=${payload.rating} proxy=${gate.proxyLabel} exitIp=${gate.exitIp} directIp=${gate.directIp || "n/a"} auth=${proxyAuthDebug(claim.proxy)} mode=${mode} reused=${reused} pid=${chromePid || "?"}`,
+    `[worker] MAPS_REVIEW #${claim.profile.browserIndex} ${claim.account.email} rating=${payload.rating} proxy=${gate.proxyLabel} exitIp=${gate.exitIp} directIp=${gate.directIp || "n/a"} auth=${proxyAuthDebug(jobProxy)} mode=${mode} reused=${reused} pid=${chromePid || "?"}`,
   );
 
   // ── 4) Vào Maps (proxy) + bình luận + lưu link ───────────────────
@@ -3026,7 +3030,7 @@ async function runMapsReviewJob(
   throwIfAborted();
   try {
     const out = await postMapsReview(page, payload, {
-      proxy: claim.proxy,
+      proxy: jobProxy,
       keepFocus,
       signal,
       accountEmail: claim.account.email,
@@ -3071,7 +3075,7 @@ async function runMapsReviewJob(
         rating: payload.rating,
         assignmentId: payload.assignmentId ?? null,
         proxy: gate.proxyLabel,
-        proxyId: claim.proxy.id,
+        proxyId: jobProxy.id,
         exitIp: gate.exitIp,
         directIp: gate.directIp,
         proxyVerified: true,
@@ -3317,12 +3321,204 @@ async function runMapsDeleteReviewJob(
   }
 }
 
+async function runGoogleProfileUpdateJob(
+  claim: ClaimPayload,
+  job: ProfileTaskJob,
+  opts?: { signal?: AbortSignal },
+) {
+  const raw = job.payload ?? claim.job?.payload;
+  const payload = accountProfileUpdatePayloadSchema.parse(raw ?? {});
+  const signal = opts?.signal;
+  const throwIfAborted = () => {
+    if (signal?.aborted) {
+      const err = new Error("ACCOUNT_PROFILE_UPDATE aborted (timeout/cancel)");
+      (err as { code?: string }).code = "ABORTED";
+      throw err;
+    }
+  };
+
+  const live = browserPool.get(claim.profile.id);
+  const reuse =
+    Boolean(live?.browser.connected) && live?.proxyEnabled === false;
+  const ensured = reuse
+    ? { browser: live!.browser, reused: true as const, pid: live!.pid }
+    : await connectOrLaunchBrowser(claim, { useProxy: false, neverKill: true });
+  const browser = ensured.browser;
+  const page =
+    reuse && live?.page && !live.page.isClosed()
+      ? live.page
+      : await setupPage(browser, claim, { useProxy: false });
+
+  if (!reuse) {
+    await browserPool.register({
+      profileId: claim.profile.id,
+      browserIndex: claim.profile.browserIndex,
+      browser,
+      page,
+      proxyId: "none",
+      cookiePath: claim.profile.cookiePath,
+      browserProfilePath: claim.profile.browserProfilePath,
+      openedAt: new Date(),
+      pid: ensured.pid || browser.process()?.pid,
+      accountEmail: claim.account.email,
+      markedReady: true,
+      proxyEnabled: false,
+      mapsReviewInProgress: true,
+      proxyAuth: null,
+    });
+  } else if (live) {
+    live.mapsReviewInProgress = true;
+  }
+
+  setMapsChromeGuard(true);
+  throwIfAborted();
+
+  console.log(
+    `[worker] ACCOUNT_PROFILE_UPDATE #${claim.profile.browserIndex} ${claim.account.email}`,
+  );
+
+  try {
+    await assertGoogleSessionForMaps(page, claim.account.email).catch((e) => {
+      throw new Error(
+        `Chưa đăng nhập Google để đổi hồ sơ: ${e instanceof Error ? e.message : e}`,
+      );
+    });
+    await ensureOnGoogleAccountProfile(page, new HumanCursor(page), {
+      forceGoto: true,
+      chromePid: ensured.pid || browser.process()?.pid,
+    });
+
+    throwIfAborted();
+    const out = await updateGoogleProfile(page, payload, {
+      signal,
+      human: new HumanCursor(page),
+      totpSecret: claim.account.totpSecret,
+    });
+
+    const browserVersion = (await browser.version().catch(() => "")) || "";
+
+    return {
+      browserVersion,
+      keepAlive: true,
+      result: {
+        ok: out.ok,
+        needsManual: out.needsManual,
+        nameUpdated: out.nameUpdated,
+        avatarUpdated: out.avatarUpdated,
+        addressUpdated: out.addressUpdated,
+        addressSkipped: out.addressSkipped,
+        detail: out.detail,
+        steps: out.steps,
+        accountId: payload.accountId,
+        email: claim.account.email,
+        browserIndex: claim.profile.browserIndex,
+      },
+    };
+  } finally {
+    const pooled = browserPool.get(claim.profile.id);
+    if (pooled) pooled.mapsReviewInProgress = false;
+    setMapsChromeGuard(false);
+  }
+}
+
+/** Quét tên + avatar thực tế từ myaccount.google.com, lưu vào GoogleAccount.googleName + googleAvatar. */
+async function runScanGoogleProfileJob(
+  claim: ClaimPayload,
+  job: ProfileTaskJob,
+  opts?: { signal?: AbortSignal },
+) {
+  const raw = job.payload ?? claim.job?.payload;
+  const payload = scanGoogleProfilePayloadSchema.parse(raw ?? {});
+  const signal = opts?.signal;
+
+  const live = browserPool.get(claim.profile.id);
+  const reuse =
+    Boolean(live?.browser.connected) && live?.proxyEnabled === false;
+  const ensured = reuse
+    ? { browser: live!.browser, reused: true as const, pid: live!.pid }
+    : await connectOrLaunchBrowser(claim, { useProxy: false, neverKill: true });
+  const browser = ensured.browser;
+  const page =
+    reuse && live?.page && !live.page.isClosed()
+      ? live.page
+      : await setupPage(browser, claim, { useProxy: false });
+
+  if (!reuse) {
+    await browserPool.register({
+      profileId: claim.profile.id,
+      browserIndex: claim.profile.browserIndex,
+      browser,
+      page,
+      proxyId: "none",
+      cookiePath: claim.profile.cookiePath,
+      browserProfilePath: claim.profile.browserProfilePath,
+      openedAt: new Date(),
+      pid: ensured.pid || browser.process()?.pid,
+      accountEmail: claim.account.email,
+      markedReady: true,
+      proxyEnabled: false,
+      mapsReviewInProgress: true,
+      proxyAuth: null,
+    });
+  } else if (live) {
+    live.mapsReviewInProgress = true;
+  }
+
+  setMapsChromeGuard(true);
+
+  console.log(
+    `[worker] SCAN_GOOGLE_PROFILE #${claim.profile.browserIndex} ${claim.account.email}`,
+  );
+
+  try {
+    await assertGoogleSessionForMaps(page, claim.account.email).catch((e) => {
+      throw new Error(
+        `Chưa đăng nhập Google để quét hồ sơ: ${e instanceof Error ? e.message : e}`,
+      );
+    });
+
+    const out = await scanGoogleProfile(page, payload, {
+      signal,
+      human: new HumanCursor(page),
+    });
+
+    const browserVersion = (await browser.version().catch(() => "")) || "";
+
+    return {
+      browserVersion,
+      keepAlive: true,
+      result: {
+        ok: out.ok,
+        name: out.name,
+        avatarUrl: out.avatarUrl,
+        detail: out.detail,
+        needsManual: out.needsManual,
+        accountId: payload.accountId,
+        email: claim.account.email,
+        browserIndex: claim.profile.browserIndex,
+      },
+    };
+  } finally {
+    const pooled = browserPool.get(claim.profile.id);
+    if (pooled) pooled.mapsReviewInProgress = false;
+    setMapsChromeGuard(false);
+  }
+}
+
 /** Timeout cứng theo task — 1 job treo (CDP đơ, dialog nền…) không được chặn cả hàng đợi. */
 const TASK_TIMEOUT_MS: Record<string, number> = {
   MAPS_REVIEW: Math.max(180_000, Number(process.env.MAPS_REVIEW_TIMEOUT_MS || 15 * 60_000)),
   MAPS_DELETE_REVIEW: Math.max(
     60_000,
     Number(process.env.MAPS_DELETE_TIMEOUT_MS || 8 * 60_000),
+  ),
+  ACCOUNT_PROFILE_UPDATE: Math.max(
+    120_000,
+    Number(process.env.ACCOUNT_PROFILE_UPDATE_TIMEOUT_MS || 12 * 60_000),
+  ),
+  SCAN_GOOGLE_PROFILE: Math.max(
+    300_000,
+    Number(process.env.SCAN_GOOGLE_PROFILE_TIMEOUT_MS || 5 * 60_000),
   ),
   HEALTHCHECK: 4 * 60_000,
   BROWSER_CHECK: 4 * 60_000,
@@ -3385,7 +3581,7 @@ async function processJob(job: ProfileTaskJob) {
     if (job.taskCode === "LOGIN") markLoginBusy(true);
     // MAPS: chỉ busy + chrome-guard sớm; mapsReviewInProgress gắn khi register
     // (tránh chặn forceClose đổi-proxy ở đầu job)
-    if (job.taskCode === "MAPS_REVIEW" || job.taskCode === "MAPS_DELETE_REVIEW") {
+    if (job.taskCode === "MAPS_REVIEW" || job.taskCode === "MAPS_DELETE_REVIEW" || job.taskCode === "ACCOUNT_PROFILE_UPDATE" || job.taskCode === "SCAN_GOOGLE_PROFILE") {
       busyProfileIds.add(job.profileId);
       setMapsChromeGuard(true);
     }
@@ -3402,7 +3598,11 @@ async function processJob(job: ProfileTaskJob) {
             ? runMapsReviewJob(claim, job, { signal: abort.signal })
             : job.taskCode === "MAPS_DELETE_REVIEW"
               ? runMapsDeleteReviewJob(claim, job, { signal: abort.signal })
-              : runHealthcheck(claim);
+              : job.taskCode === "ACCOUNT_PROFILE_UPDATE"
+                ? runGoogleProfileUpdateJob(claim, job, { signal: abort.signal })
+                : job.taskCode === "SCAN_GOOGLE_PROFILE"
+                  ? runScanGoogleProfileJob(claim, job, { signal: abort.signal })
+                  : runHealthcheck(claim);
     const out = await runWithTimeout(
       taskPromise,
       taskTimeoutMs,
@@ -3433,6 +3633,9 @@ async function processJob(job: ProfileTaskJob) {
     if (job.taskCode === "MAPS_DELETE_REVIEW" && liveAfter) {
       liveAfter.mapsReviewInProgress = false;
     }
+    if (job.taskCode === "ACCOUNT_PROFILE_UPDATE" && liveAfter) {
+      liveAfter.mapsReviewInProgress = false;
+    }
     let stillAlive = Boolean(liveAfter?.browser.connected);
     if (!stillAlive && job.taskCode === "MAPS_REVIEW") {
       const dir = path.resolve(STORAGE_DIR, claim.profile.browserProfilePath);
@@ -3442,6 +3645,10 @@ async function processJob(job: ProfileTaskJob) {
     // DELETE: luôn báo browserAlive=false — sẽ tắt Chrome ngay sau complete
     if (job.taskCode === "MAPS_DELETE_REVIEW") {
       stillAlive = false;
+    }
+    // PROFILE_UPDATE: giữ Chrome mở nếu cần giải tay
+    if (job.taskCode === "ACCOUNT_PROFILE_UPDATE") {
+      stillAlive = Boolean(liveAfter?.browser.connected);
     }
     await api("/internal/jobs/complete", {
       profileId: job.profileId,

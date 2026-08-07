@@ -194,6 +194,20 @@ export class InternalService {
       }
     }
 
+    if (jobRun.taskCode === "ACCOUNT_PROFILE_UPDATE") {
+      await this.prisma.googleAccount
+        .update({
+          where: { id: profile.account.id },
+          data: { profileSyncStatus: "SYNCING", profileSyncError: null },
+        })
+        .catch(() => undefined);
+    }
+
+    // SCAN_GOOGLE_PROFILE: không cần set trạng thái đặc biệt
+    if (jobRun.taskCode === "SCAN_GOOGLE_PROFILE") {
+      // nothing to pre-set
+    }
+
     const jobProxy = jobRun.proxy;
 
     return {
@@ -220,6 +234,10 @@ export class InternalService {
           : null,
         recoveryEmail: profile.account.recoveryEmail,
         status: profile.account.status,
+        desiredName: profile.account.desiredName,
+        desiredAddress: profile.account.desiredAddress,
+        desiredAvatarUrl: profile.account.desiredAvatarUrl,
+        avatarLocalPath: profile.account.avatarLocalPath,
       },
       /** LOGIN: null. MAPS_REVIEW: proxy đã lock random lúc enqueue. */
       proxy: jobProxy
@@ -298,7 +316,9 @@ export class InternalService {
       job?.taskCode === "BROWSER_CHECK" ||
       job?.taskCode === "LOGIN" ||
       job?.taskCode === "MAPS_REVIEW" ||
-      job?.taskCode === "MAPS_DELETE_REVIEW";
+      job?.taskCode === "MAPS_DELETE_REVIEW" ||
+      job?.taskCode === "ACCOUNT_PROFILE_UPDATE" ||
+      job?.taskCode === "SCAN_GOOGLE_PROFILE";
     const nextRun = skipCooldown
       ? now
       : new Date(now.getTime() + profile.cooldownMinutes * 60_000);
@@ -313,7 +333,11 @@ export class InternalService {
     // (tránh race: ready xong CDP disconnect → complete ghi đè UNREADY).
     // MAPS_DELETE_REVIEW cố ý tắt Chrome — luôn giữ READY để không phá đăng bài sau.
     const profileStatus =
-      markReady || alreadyReady || job?.taskCode === "MAPS_DELETE_REVIEW"
+      markReady ||
+      alreadyReady ||
+      job?.taskCode === "MAPS_DELETE_REVIEW" ||
+      job?.taskCode === "ACCOUNT_PROFILE_UPDATE" ||
+      job?.taskCode === "SCAN_GOOGLE_PROFILE"
         ? "READY"
         : "UNREADY";
 
@@ -530,11 +554,51 @@ export class InternalService {
           });
         }
       }
+
+      if (job?.taskCode === "ACCOUNT_PROFILE_UPDATE") {
+        const needsManual = input.result?.needsManual === true;
+        const ok = input.result?.ok === true;
+        const detail =
+          typeof input.result?.detail === "string"
+            ? input.result.detail
+            : ok
+              ? "Đồng bộ hồ sơ thành công"
+              : "Đồng bộ hồ sơ không hoàn tất";
+        await tx.googleAccount.update({
+          where: { id: profile.accountId },
+          data: {
+            profileSyncStatus: needsManual
+              ? "NEEDS_MANUAL"
+              : ok
+                ? "SYNCED"
+                : "FAILED",
+            profileSyncError: needsManual || !ok ? detail.slice(0, 2000) : null,
+            profileSyncedAt: ok ? now : undefined,
+          },
+        });
+      }
+
+      // SCAN_GOOGLE_PROFILE: lưu tên + avatar thực tế vào DB
+      if (job?.taskCode === "SCAN_GOOGLE_PROFILE") {
+        const name = typeof input.result?.name === "string" ? input.result.name : null;
+        const avatarUrl =
+          typeof input.result?.avatarUrl === "string" ? input.result.avatarUrl : null;
+        await tx.googleAccount.update({
+          where: { id: profile.accountId },
+          data: {
+            googleName: name,
+            googleAvatar: avatarUrl,
+          },
+        });
+      }
     });
 
-    // DELETE không dùng proxy — không cooldown proxy
+    // DELETE / PROFILE_UPDATE / SCAN không dùng proxy — không cooldown proxy
     await this.releaseJobProxy(job, {
-      applyCooldown: job?.taskCode !== "MAPS_DELETE_REVIEW",
+      applyCooldown:
+        job?.taskCode !== "MAPS_DELETE_REVIEW" &&
+        job?.taskCode !== "ACCOUNT_PROFILE_UPDATE" &&
+        job?.taskCode !== "SCAN_GOOGLE_PROFILE",
     });
 
     return { ok: true, nextRun, browserIndex: profile.browserIndex, browserAlive, markReady, status: profileStatus };
@@ -575,6 +639,11 @@ export class InternalService {
         (job?.taskCode === "MAPS_REVIEW" && chromeTransient) ||
         // DELETE cố ý tắt Chrome — account vẫn READY để đăng bài sau
         (job?.taskCode === "MAPS_DELETE_REVIEW" &&
+          (profile.status === "READY" ||
+            profile.status === "RUNNING" ||
+            profile.status === "QUEUED" ||
+            chromeTransient)) ||
+        (job?.taskCode === "ACCOUNT_PROFILE_UPDATE" &&
           (profile.status === "READY" ||
             profile.status === "RUNNING" ||
             profile.status === "QUEUED" ||
@@ -699,6 +768,23 @@ export class InternalService {
             },
           });
         }
+      }
+
+      if (job?.taskCode === "ACCOUNT_PROFILE_UPDATE") {
+        const needsManual =
+          /verify|xác minh|challenge|recaptcha|password|mật khẩu/i.test(input.error);
+        await tx.googleAccount.update({
+          where: { id: profile.accountId },
+          data: {
+            profileSyncStatus: needsManual ? "NEEDS_MANUAL" : "FAILED",
+            profileSyncError: input.error.slice(0, 2000),
+          },
+        });
+      }
+
+      // SCAN_GOOGLE_PROFILE: lỗi vẫn lưu partial kết quả nếu có
+      if (job?.taskCode === "SCAN_GOOGLE_PROFILE") {
+        // Không set trạng thái lỗi đặc biệt — googleName/googleAvatar có thể null
       }
     });
 

@@ -75,6 +75,30 @@ async function main() {
     },
   });
 
+  await prisma.taskDefinition.upsert({
+    where: { code: "ACCOUNT_PROFILE_UPDATE" },
+    update: {},
+    create: {
+      code: "ACCOUNT_PROFILE_UPDATE",
+      name: "Update Google account profile",
+      timeoutMs: 900000,
+      maxRetries: 1,
+      handlerKey: "account.profileUpdate",
+    },
+  });
+
+  await prisma.taskDefinition.upsert({
+    where: { code: "SCAN_GOOGLE_PROFILE" },
+    update: {},
+    create: {
+      code: "SCAN_GOOGLE_PROFILE",
+      name: "Scan Google profile (name + avatar)",
+      timeoutMs: 600000,
+      maxRetries: 1,
+      handlerKey: "account.scanProfile",
+    },
+  });
+
   const proxy = await prisma.proxy.upsert({
     where: { host_port: { host: "127.0.0.1", port: 8080 } },
     update: {},

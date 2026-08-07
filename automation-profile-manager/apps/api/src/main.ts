@@ -3,6 +3,7 @@ import { config as loadEnv } from "dotenv";
 import { resolve } from "path";
 import { NestFactory } from "@nestjs/core";
 import { ValidationPipe } from "@nestjs/common";
+import type { NestExpressApplication } from "@nestjs/platform-express";
 import { AppModule } from "./app.module";
 import { requireSecrets } from "./config/require-secrets";
 import { resolveCorsOrigins } from "./config/origins";
@@ -11,7 +12,9 @@ loadEnv({ path: resolve(__dirname, "../.env") });
 requireSecrets();
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  // Avatar upload dùng JSON base64; 8MB file thành khoảng 10.7MB payload.
+  app.useBodyParser("json", { limit: "12mb" });
   const origins = resolveCorsOrigins();
   app.enableCors({
     origin: origins,
